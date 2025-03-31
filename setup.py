@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+import io
 
 setup(
     name="nii_trainer",
@@ -17,12 +18,12 @@ setup(
         "pillow>=8.0.0",
         "opencv-python>=4.5.0"
     ],
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Marouan Blelletta",
+    author_email="maoruanblelletta@gmail.com",
     description="A flexible framework for training neural networks on NIfTI data",
-    long_description=open("README.md").read(),
+    long_description=io.open("README.md", encoding='utf-8').read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/nii_trainer",
+    url="https://github.com/Blelletta-Marouan/nii_trainer",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
