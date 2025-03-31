@@ -12,7 +12,7 @@ import numpy as np
 from ..configs.config import TrainerConfig
 from ..visualization.visualizer import SegmentationVisualizer
 from ..losses.losses import CascadedLossWithReward
-from .cascaded_unet import CascadedUNet
+from .cascaded_unet import FlexibleCascadedUNet
 
 class ModelTrainer:
     """
@@ -26,7 +26,7 @@ class ModelTrainer:
     def __init__(
         self,
         config: TrainerConfig,
-        model: CascadedUNet,
+        model: FlexibleCascadedUNet,
         train_loader: DataLoader,
         val_loader: DataLoader,
         optimizer: Optimizer,
@@ -54,7 +54,7 @@ class ModelTrainer:
         
         # Initialize visualizer
         self.visualizer = SegmentationVisualizer(
-            config.model.classes,
+            config.data.classes,  # Fix: use data.classes instead of model.classes
             save_dir=str(self.exp_dir / 'visualizations')
         )
         

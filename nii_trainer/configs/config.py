@@ -3,6 +3,15 @@ from typing import List, Optional, Dict, Tuple, Any
 import torch
 
 @dataclass
+class ModelConfig:
+    """Configuration for model architecture components."""
+    encoder_type: str = "mobilenet_v2"  # mobilenet_v2, resnet18, resnet50, efficientnet
+    in_channels: int = 1
+    initial_features: int = 32
+    num_layers: int = 5
+    pretrained: bool = True
+
+@dataclass
 class StageConfig:
     """Configuration for a single stage in the cascaded model."""
     input_classes: List[str]  # Classes to consider as input
@@ -60,8 +69,14 @@ class LossConfig:
     weight_dice: float = 0.5
     focal_gamma: float = 2.0
     reward_coef: float = 0.1
-    stage_weights: List[float] = None  # Weight for each stage's loss
-    class_weights: Dict[str, float] = None  # Weight for each class
+    stage_weights: Optional[List[float]] = None  # Weight for each stage's loss
+    class_weights: Optional[Dict[str, float]] = None  # Weight for each class
+    threshold_per_class: Optional[List[float]] = None  # Threshold for each class
+    
+    def __post_init__(self):
+        # Set default thresholds if not provided
+        if self.threshold_per_class is None:
+            self.threshold_per_class = [0.5] * 3  # Default threshold for each stage
 
 @dataclass
 class TrainerConfig:
@@ -126,8 +141,6 @@ def create_liver_config() -> TrainerConfig:
             input_classes=["background", "foreground"],
             target_class="foreground",
             encoder_type="mobilenet_v2",
-            encoder_layers=5,
-            decoder_layers=5,
             is_binary=True
         ),
         # Subsequent stages: Fine-grained segmentation
