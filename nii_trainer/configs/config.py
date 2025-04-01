@@ -17,8 +17,7 @@ class StageConfig:
     input_classes: List[str]  # Classes to consider as input
     target_class: str        # Class to segment in this stage
     encoder_type: str = "mobilenet_v2"  # Encoder backbone for this stage
-    encoder_layers: int = 5  # Number of encoder layers
-    decoder_layers: int = 5  # Number of decoder layers
+    num_layers: int = 5  # Number of layers for both encoder and decoder
     skip_connections: bool = True
     dropout_rate: float = 0.3
     threshold: float = 0.5   # Prediction threshold for this stage
@@ -141,6 +140,7 @@ def create_liver_config() -> TrainerConfig:
             input_classes=["background", "foreground"],
             target_class="foreground",
             encoder_type="mobilenet_v2",
+            num_layers=5,
             is_binary=True
         ),
         # Subsequent stages: Fine-grained segmentation
@@ -148,22 +148,19 @@ def create_liver_config() -> TrainerConfig:
             input_classes=["foreground"],
             target_class="liver",
             encoder_type="resnet18",
-            encoder_layers=4,
-            decoder_layers=4
+            num_layers=4
         ),
         StageConfig(
             input_classes=["liver"],
             target_class="tumor",
             encoder_type="efficientnet",
-            encoder_layers=4,
-            decoder_layers=4
+            num_layers=4
         ),
         StageConfig(
             input_classes=["liver"],
             target_class="vessel",
             encoder_type="mobilenet_v2",
-            encoder_layers=3,
-            decoder_layers=3
+            num_layers=3
         )
     ]
     

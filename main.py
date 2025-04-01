@@ -40,7 +40,8 @@ def main():
             batch_size=8,
             window_params={"window_width": 180, "window_level": 50},
             skip_empty=True,
-            slice_step=4
+            slice_step=4,
+            train_val_test_split=(0.7, 0.15, 0.15)  # Update to 70/15/15 split
         ),
         cascade=CascadeConfig(
             stages=[
@@ -49,8 +50,7 @@ def main():
                     input_classes=["background", "liver"],
                     target_class="liver",
                     encoder_type="resnet18",
-                    encoder_layers=5,
-                    decoder_layers=5,
+                    num_layers=5,
                     is_binary=True,
                     threshold=0.5
                 ),
@@ -59,8 +59,7 @@ def main():
                     input_classes=["liver"],  # Only one input class
                     target_class="tumor",
                     encoder_type="efficientnet",
-                    encoder_layers=4,
-                    decoder_layers=4,
+                    num_layers=4,
                     is_binary=True,  # Tumor is also binary within liver
                     threshold=0.5
                 )

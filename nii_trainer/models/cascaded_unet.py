@@ -26,6 +26,7 @@ class CascadeStage(nn.Module):
             self.logger.info(f"  Input channels: {in_channels}")
             self.logger.info(f"  Initial features: {initial_features}")
             self.logger.info(f"  Encoder type: {stage_config.encoder_type}")
+            self.logger.info(f"  Num layers: {stage_config.num_layers}")
             self.logger.info(f"  Is binary: {stage_config.is_binary}")
         
         # Create encoder
@@ -45,7 +46,7 @@ class CascadeStage(nn.Module):
         # Create decoder stages
         self.decoder = self._create_decoder(
             encoder_channels,
-            stage_config.decoder_layers,
+            stage_config.num_layers,
             stage_config.dropout_rate
         )
 
@@ -61,7 +62,7 @@ class CascadeStage(nn.Module):
             encoder_type=config.encoder_type,
             in_channels=in_channels,
             initial_features=initial_features,
-            num_layers=config.encoder_layers,
+            num_layers=config.num_layers,
             pretrained=pretrained
         )
         return EncoderFactory.create_encoder(encoder_config)
