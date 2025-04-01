@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -72,13 +73,22 @@ class CascadedLossWithReward(nn.Module):
     Combined loss for cascaded segmentation with reward mechanism.
     Supports multiple stages and classes with configurable weights and thresholds.
     """
-    def __init__(self, config: LossConfig):
+    def __init__(self, config: LossConfig, logger: Optional[logging.Logger] = None):
         super().__init__()
         self.config = config
         self.dice_loss = DiceLoss()
         self.focal_loss = FocalLoss(gamma=config.focal_gamma)
         self.metrics = MetricCalculator()
+        self.logger = logger or logging.getLogger(__name__)
         
+        self.logger.info("Initializing CascadedLossWithReward")
+        self.logger.debug(f"Loss config - BCE weight: {config.weight_bce}, Dice weight: {config.weight_dice}")
+        self.logger.debug(f"Focal gamma: {config.focal_gamma}, Reward coefficient: {config.reward_coef}")
+        if config.stage_weights:
+            self.logger.debug(f"Stage weights: {config.stage_weights}")
+        if config.class_weights:
+            self.logger.debug(f"Class weights: {config.class_weights}")
+
     def compute_stage_loss(
         self,
         pred: torch.Tensor,
@@ -102,7 +112,7 @@ class CascadedLossWithReward(nn.Module):
             recall = self.metrics.recall(pred, target, threshold)
             iou = self.metrics.jaccard(pred, target, threshold)
         
-        # Compute reward (weighted combination of metrics)
+        # Compute reward
         reward = self.config.reward_coef * (
             0.2 * dice +
             0.2 * precision +
@@ -113,6 +123,11 @@ class CascadedLossWithReward(nn.Module):
         # Final loss with class weight and reward
         final_loss = class_weight * (base_loss - reward)
         
+        self.logger.debug(
+            f"Stage metrics - Dice: {dice:.4f}, Precision: {precision:.4f}, "
+            f"Recall: {recall:.4f}, IoU: {iou:.4f}, Reward: {reward:.4f}"
+        )
+        
         return {
             'loss': final_loss,
             'base_loss': base_loss,
@@ -122,36 +137,28 @@ class CascadedLossWithReward(nn.Module):
             'iou': iou,
             'reward': reward
         }
-        
+
     def forward(
         self,
         predictions: List[torch.Tensor],
         target: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass computing loss for all stages.
-        Args:
-            predictions: List of predictions from each stage [B, 1, H, W]
-            target: Target mask [B, H, W] with class indices
-        """
-        num_stages = len(predictions)
+        """Forward pass computing loss for all stages."""
         total_loss = 0
         metrics_dict = {}
         
-        # Get class weights (default to 1.0 if not specified)
-        class_weights = (
-            self.config.class_weights if self.config.class_weights
-            else [1.0] * num_stages
-        )
+        self.logger.debug(f"Computing loss for {len(predictions)} stages")
         
-        # Process each stage
-        for stage, (pred, weight, threshold) in enumerate(zip(
-            predictions,
-            class_weights,
-            self.config.threshold_per_class
-        )):
-            # Create binary target for this stage
-            stage_target = (target == (stage + 1)).float().unsqueeze(1)
+        for stage, (pred, stage_target) in enumerate(zip(predictions, target)):
+            # Get stage configuration
+            weight = (self.config.stage_weights[stage] 
+                     if self.config.stage_weights else 1.0)
+            threshold = (self.config.threshold_per_class[stage] 
+                        if self.config.threshold_per_class else 0.5)
+            
+            self.logger.debug(
+                f"Stage {stage+1} - Weight: {weight:.2f}, Threshold: {threshold:.2f}"
+            )
             
             # Compute stage metrics
             stage_metrics = self.compute_stage_loss(
@@ -165,4 +172,6 @@ class CascadedLossWithReward(nn.Module):
                 metrics_dict[f'stage{stage+1}_{k}'] = v
                 
         metrics_dict['total_loss'] = total_loss
+        self.logger.debug(f"Total loss: {total_loss:.4f}")
+        
         return metrics_dict

@@ -1,10 +1,10 @@
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import seaborn as sns
-from ..configs.config import ModelConfig
 
 class SegmentationVisualizer:
     """
@@ -16,16 +16,23 @@ class SegmentationVisualizer:
     - Uncertainty visualization
     - Metric plots and training curves
     """
-    def __init__(self, class_names: List[str], save_dir: Optional[str] = None):
+    def __init__(self, class_names: List[str], save_dir: Optional[str] = None, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger(__name__)
+        self.logger.info(f"Initializing visualizer with {len(class_names)} classes")
+        self.logger.debug(f"Class names: {class_names}")
+        
         self.class_names = class_names
         self.save_dir = Path(save_dir) if save_dir else None
-        self.class_colors = self._generate_colors(len(class_names))
         
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
-    
+            self.logger.info(f"Initialized visualization directory at {self.save_dir}")
+        
+        self.class_colors = self._generate_colors(len(class_names))
+
     def _generate_colors(self, num_classes: int) -> List[Tuple[float, float, float]]:
         """Generate distinct colors for each class."""
+        self.logger.debug(f"Generating {num_classes} distinct colors")
         colors = [(0, 0, 0)]  # Background is black
         if num_classes > 1:
             # Generate distinct colors using HSV color space

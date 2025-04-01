@@ -6,16 +6,19 @@ from torchvision import models
 from ..configs.config import ModelConfig
 
 class EncoderFactory:
-    """Factory for creating different types of encoders."""
-    
     @staticmethod
     def create_encoder(config: ModelConfig) -> nn.Module:
+        """Create encoder based on configuration."""
         if config.encoder_type == "mobilenet_v2":
             return MobileNetV2Encoder(config)
         elif config.encoder_type == "resnet18":
-            return ResNetEncoder(models.resnet18, config)
-        elif config.encoder_type == "resnet50":
-            return ResNetEncoder(models.resnet50, config)
+            return ResNetEncoder(
+                model_fn=models.resnet18,
+                in_channels=config.in_channels,
+                initial_features=config.initial_features,
+                num_layers=config.num_layers,
+                pretrained=config.pretrained
+            )
         elif config.encoder_type == "efficientnet":
             return EfficientNetEncoder(config)
         else:
@@ -67,22 +70,39 @@ class MobileNetV2Encoder(EncoderBase):
 
 class ResNetEncoder(EncoderBase):
     """ResNet-based encoder."""
-    def __init__(self, model_fn: Type[nn.Module], config: ModelConfig):
+    def __init__(
+        self,
+        model_fn: Type[nn.Module],
+        in_channels: int,
+        initial_features: int,
+        num_layers: int,
+        pretrained: bool = True
+    ):
         super().__init__()
-        backbone = model_fn(pretrained=config.pretrained)
+        # Initialize with pretrained weights if requested
+        backbone = model_fn(pretrained=pretrained)
         
-        # Modify first conv for arbitrary input channels
-        if config.in_channels != 3:
-            first_conv = nn.Conv2d(config.in_channels, 64, kernel_size=7,
-                                 stride=2, padding=3, bias=False)
-            if config.pretrained:
-                with torch.no_grad():
-                    first_conv.weight[:, :3, ...] = backbone.conv1.weight
-                    if config.in_channels > 3:
-                        mean_weights = torch.mean(backbone.conv1.weight, dim=1)
-                        first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
-            backbone.conv1 = first_conv
-            
+        # Modify first convolution layer to handle different input channels
+        first_conv = nn.Conv2d(
+            in_channels,
+            64,  # ResNet always uses 64 initial features
+            kernel_size=7,
+            stride=2,
+            padding=3,
+            bias=False
+        )
+        
+        # If using pretrained weights, adapt the first conv layer
+        if pretrained:
+            # For single channel input, average the RGB weights
+            if in_channels == 1:
+                first_conv.weight.data = backbone.conv1.weight.data.mean(dim=1, keepdim=True)
+            elif in_channels > 3:
+                first_conv.weight.data[:, :3, ...] = backbone.conv1.weight.data
+                first_conv.weight.data[:, 3:, ...] = 0.0
+        
+        backbone.conv1 = first_conv
+        
         # Create stages
         self.stages = nn.ModuleList([
             nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu),
@@ -90,13 +110,20 @@ class ResNetEncoder(EncoderBase):
             backbone.layer2,
             backbone.layer3,
             backbone.layer4
-        ])
+        ][:num_layers])  # Only keep the requested number of layers
         
         # Set output channels based on ResNet variant
         if "18" in str(model_fn) or "34" in str(model_fn):
-            self.out_channels = [64, 64, 128, 256, 512]
+            self.out_channels = [64, 64, 128, 256, 512][:num_layers]
         else:  # ResNet50, 101, 152
-            self.out_channels = [64, 256, 512, 1024, 2048]
+            self.out_channels = [64, 256, 512, 1024, 2048][:num_layers]
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        features = []
+        for stage in self.stages:
+            x = stage(x)
+            features.append(x)
+        return features
 
 class EfficientNetEncoder(EncoderBase):
     """EfficientNet-based encoder."""
@@ -110,10 +137,15 @@ class EfficientNetEncoder(EncoderBase):
                                  stride=2, padding=1, bias=False)
             if config.pretrained:
                 with torch.no_grad():
-                    first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
-                    if config.in_channels > 3:
-                        mean_weights = torch.mean(backbone.features[0][0].weight, dim=1)
-                        first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
+                    # For single channel, use mean of RGB weights
+                    if config.in_channels == 1:
+                        first_conv.weight.data = backbone.features[0][0].weight.data.mean(dim=1, keepdim=True)
+                    else:
+                        # For more channels, copy first 3 and initialize rest with mean
+                        first_conv.weight[:, :min(3, config.in_channels), ...] = backbone.features[0][0].weight[:, :min(3, config.in_channels), ...]
+                        if config.in_channels > 3:
+                            mean_weights = torch.mean(backbone.features[0][0].weight, dim=1)
+                            first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
             backbone.features[0][0] = first_conv
             
         # Split into stages
@@ -137,26 +169,43 @@ class DecoderBlock(nn.Module):
         dropout_rate: float = 0.0
     ):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels + skip_channels, out_channels, 3, padding=1)
+        # Handle initial upsampling conv
+        self.up_conv = nn.ConvTranspose2d(
+            in_channels, in_channels // 2,
+            kernel_size=2, stride=2
+        )
+        
+        # After concatenating with skip connection
+        combined_channels = (in_channels // 2) + skip_channels if skip_channels > 0 else in_channels // 2
+        
+        # Two convolutions to process combined features
+        self.conv1 = nn.Conv2d(combined_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
+        
         self.relu = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout2d(dropout_rate) if dropout_rate > 0 else None
         
     def forward(self, x: torch.Tensor, skip: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Upconv instead of interpolate
+        x = self.up_conv(x)
+        
+        # Concatenate skip connection if provided
         if skip is not None:
-            x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
+            # Handle case where sizes don't match exactly
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
-        else:
-            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
             
+        # First conv + activation
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         if self.dropout is not None:
             x = self.dropout(x)
             
+        # Second conv + activation    
         x = self.conv2(x)
         x = self.bn2(x)
         x = self.relu(x)

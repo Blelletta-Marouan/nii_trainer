@@ -2,6 +2,8 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
+import logging
+from ..utils.logging_utils import setup_logger, log_config
 
 from nii_trainer.configs.config import (
     TrainerConfig,
@@ -20,94 +22,28 @@ from nii_trainer.visualization.visualizer import SegmentationVisualizer
 
 def main():
     # 1. Create or load configuration
-    # Option 1: Use the predefined liver configuration
-    config = create_liver_config()
+    config = create_liver_config()  # or custom_config
     
-    # Option 2: Create a custom configuration
-    # Example: 4-stage cascade for brain tumor segmentation
-    custom_config = TrainerConfig(
-        data=DataConfig(
-            base_dir="/path/to/data",
-            output_dir="/path/to/output",
-            classes=[
-                "background",
-                "white_matter",
-                "gray_matter",
-                "tumor_core",
-                "edema"
-            ],
-            class_map=None,  # Will be auto-generated
-            img_size=(256, 256),
-            batch_size=8,
-            window_params={
-                "width": 80,
-                "level": 40
-            }
-        ),
-        cascade=CascadeConfig(
-            stages=[
-                # Stage 1: Segment brain tissue from background
-                StageConfig(
-                    input_classes=["background", "white_matter", "gray_matter"],
-                    target_class="white_matter",
-                    encoder_type="resnet18",
-                    encoder_layers=5,
-                    decoder_layers=5
-                ),
-                # Stage 2: Segment gray matter
-                StageConfig(
-                    input_classes=["white_matter", "gray_matter"],
-                    target_class="gray_matter",
-                    encoder_type="mobilenet_v2",
-                    encoder_layers=4,
-                    decoder_layers=4
-                ),
-                # Stage 3: Segment tumor core
-                StageConfig(
-                    input_classes=["white_matter", "gray_matter", "tumor_core"],
-                    target_class="tumor_core",
-                    encoder_type="efficientnet",
-                    encoder_layers=4,
-                    decoder_layers=4
-                ),
-                # Stage 4: Segment edema
-                StageConfig(
-                    input_classes=["tumor_core", "edema"],
-                    target_class="edema",
-                    encoder_type="resnet18",
-                    encoder_layers=3,
-                    decoder_layers=3
-                )
-            ],
-            in_channels=1,
-            initial_features=32,
-            feature_growth=2.0
-        ),
-        training=TrainingConfig(
-            learning_rate=1e-4,
-            epochs=100,
-            batch_accumulation=2  # Effective batch size = batch_size * batch_accumulation
-        ),
-        loss=LossConfig(
-            stage_weights=[1.0, 1.2, 1.5, 1.5],
-            class_weights={
-                "background": 1.0,
-                "white_matter": 2.0,
-                "gray_matter": 2.0,
-                "tumor_core": 4.0,
-                "edema": 3.0
-            }
-        ),
-        experiment_name="brain_tumor_cascade"
+    # Setup logging
+    logger = setup_logger(
+        experiment_name=config.experiment_name,
+        save_dir=config.save_dir
     )
+    logger.info(f"Starting experiment: {config.experiment_name}")
     
-    # Choose which configuration to use
-    config = custom_config  # or config for liver segmentation
+    # Log configuration
+    log_config(logger, {
+        'data': vars(config.data),
+        'training': vars(config.training),
+        'loss': vars(config.loss)
+    })
     
     # 2. Create preprocessing pipeline
+    logger.info("Initializing preprocessing pipeline...")
     preprocessor = NiiPreprocessor(config.data)
     
     # 3. Create datasets
+    logger.info("Creating datasets and dataloaders...")
     transform_train = PairedTransform(
         image_size=config.data.img_size,
         augment=True
@@ -124,6 +60,7 @@ def main():
         transform=transform_train,
         balance=config.data.balance_dataset
     )
+    logger.info(f"Training dataset size: {len(train_dataset)}")
     
     # Create validation dataset
     val_dataset = MultiClassSegDataset(
@@ -132,6 +69,7 @@ def main():
         transform=transform_val,
         balance=False
     )
+    logger.info(f"Validation dataset size: {len(val_dataset)}")
     
     # Create data loaders
     train_loader = DataLoader(
@@ -151,10 +89,13 @@ def main():
     )
     
     # 4. Create model
+    logger.info("Creating model...")
     model = FlexibleCascadedUNet(config.cascade)
     model = model.to(config.training.device)
+    logger.info(f"Model created and moved to {config.training.device}")
     
     # 5. Create optimizer
+    logger.info("Setting up optimizer...")
     optimizer = optim.Adam(
         model.parameters(),
         lr=config.training.learning_rate,
@@ -162,6 +103,7 @@ def main():
     )
     
     # 6. Create learning rate scheduler
+    logger.info("Setting up learning rate scheduler...")
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -171,25 +113,31 @@ def main():
     )
     
     # 7. Create trainer
+    logger.info("Initializing trainer...")
     trainer = ModelTrainer(
         config=config,
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
-        scheduler=scheduler
+        scheduler=scheduler,
+        logger=logger  # Pass logger to trainer
     )
     
     # 8. Train model
+    logger.info("Starting training...")
     trainer.train()
+    logger.info("Training completed!")
     
     # 9. Create visualizer for results
+    logger.info("Creating visualizations...")
     visualizer = SegmentationVisualizer(
         class_names=config.data.classes,
         save_dir=str(Path(config.save_dir) / config.experiment_name / "visualizations")
     )
     
     # 10. Visualize some predictions
+    logger.info("Generating final predictions visualization...")
     model.eval()
     with torch.no_grad():
         for images, targets in val_loader:
@@ -209,6 +157,8 @@ def main():
                 save_dir=str(Path(config.save_dir) / config.experiment_name / "final_predictions")
             )
             break  # Just visualize one batch
+    
+    logger.info("Pipeline completed successfully!")
 
 if __name__ == "__main__":
     main()
