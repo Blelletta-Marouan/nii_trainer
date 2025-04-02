@@ -132,15 +132,49 @@ class SegmentationVisualizer:
     ) -> None:
         """Plot training metrics history."""
         num_metrics = len(metrics)
-        fig, axes = plt.subplots(
-            (num_metrics + 1) // 2, 2,
-            figsize=(15, 5 * ((num_metrics + 1) // 2))
-        )
-        axes = axes.flatten()
         
-        for ax, (metric_name, values) in zip(axes, metrics.items()):
+        # Create grouped figure layout based on metric types
+        loss_metrics = [k for k in metrics.keys() if 'loss' in k.lower()]
+        other_metrics = [k for k in metrics.keys() if 'loss' not in k.lower()]
+        
+        num_plots = len(other_metrics) + 1  # One plot for all losses together
+        
+        fig, axes = plt.subplots(
+            (num_plots + 1) // 2, min(2, num_plots),
+            figsize=(15, 5 * ((num_plots + 1) // 2))
+        )
+        
+        if num_plots == 1:
+            axes = [axes]
+        elif num_plots > 0:
+            axes = axes.flatten()
+        
+        # Plot all loss metrics together in the first subplot for easy comparison
+        if loss_metrics:
+            ax = axes[0]
+            for metric_name in loss_metrics:
+                values = metrics[metric_name]
+                epochs = range(1, len(values) + 1)
+                
+                # Use different styles for base loss vs reward-adjusted loss
+                if 'base' in metric_name.lower():
+                    ax.plot(epochs, values, '--', label=metric_name)  # Dashed line for base loss
+                else:
+                    ax.plot(epochs, values, '-', label=metric_name)   # Solid line for final loss
+                    
+            ax.set_title('Loss Metrics (with/without reward)')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Loss Value')
+            ax.grid(True)
+            ax.legend()
+            
+        # Plot other metrics
+        for i, metric_name in enumerate(other_metrics):
+            values = metrics[metric_name]
             epochs = range(1, len(values) + 1)
-            ax.plot(epochs, values, 'b-', label=metric_name)
+            
+            ax = axes[i + 1] if loss_metrics else axes[i]
+            ax.plot(epochs, values, 'g-', label=metric_name)
             ax.set_title(metric_name)
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Value')

@@ -1,3 +1,7 @@
 dist
 nii_trainer.egg-info
 tests
+examples/liver_tumor_segmentation.ipynb
+segmentations
+volume_pt1
+examples

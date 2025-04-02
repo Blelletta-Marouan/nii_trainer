@@ -47,11 +47,20 @@ class MobileNetV2Encoder(EncoderBase):
         # Modify first conv for arbitrary input channels
         first_conv = nn.Conv2d(config.in_channels, 32, kernel_size=3, 
                              stride=2, padding=1, bias=False)
-        if config.in_channels != 3 and config.pretrained:
-            # Initialize new channels with mean of pretrained weights
-            with torch.no_grad():
-                first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
-                if config.in_channels > 3:
+        if config.pretrained:
+            # Initialize with pretrained weights
+            if config.in_channels == 1:
+                # For single channel input, average the RGB weights
+                with torch.no_grad():
+                    first_conv.weight.data = backbone.features[0][0].weight.data.mean(dim=1, keepdim=True)
+            elif config.in_channels == 3:
+                # Standard 3-channel case, directly copy weights
+                with torch.no_grad():
+                    first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
+            elif config.in_channels > 3:
+                # Multi-channel case: copy first 3 channels and initialize the rest
+                with torch.no_grad():
+                    first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
                     mean_weights = torch.mean(backbone.features[0][0].weight, dim=1)
                     first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
                     

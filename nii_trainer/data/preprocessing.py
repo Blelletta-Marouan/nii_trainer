@@ -102,6 +102,7 @@ class NiiPreprocessor:
             self.logger.info(f"Processing specified slice indices: {len(slice_indices)} slices")
         
         skipped_empty = 0
+        skipped_existing = 0
         processed_slices = 0
         
         # Initialize counters for each split
@@ -116,6 +117,23 @@ class NiiPreprocessor:
             
             if self.config.skip_empty and not np.any(slice_seg > 0):
                 skipped_empty += 1
+                continue
+            
+            # Generate base_name here to check if files already exist
+            base_name = f"slice_{idx:04d}"
+            
+            # Check if this slice already exists in any of the split directories
+            file_exists = False
+            for split in ["train", "val", "test"]:
+                img_path = output_dir / split / "data" / f"{base_name}.png"
+                seg_path = output_dir / split / "labels" / f"{base_name}.png"
+                if img_path.exists() and seg_path.exists():
+                    file_exists = True
+                    saved_pairs.append((img_path, seg_path))
+                    skipped_existing += 1
+                    break
+            
+            if file_exists:
                 continue
                 
             # Convert to uint8 and resize
@@ -146,8 +164,7 @@ class NiiPreprocessor:
             data_dir = output_dir / split / "data"
             labels_dir = output_dir / split / "labels"
             
-            # Generate filenames
-            base_name = f"slice_{idx:04d}"
+            # Use base_name from earlier
             img_path = data_dir / f"{base_name}.png"
             seg_path = labels_dir / f"{base_name}.png"
             
@@ -165,10 +182,11 @@ class NiiPreprocessor:
         self.logger.info(f"Finished processing volume:")
         self.logger.info(f"  Total slices processed: {processed_slices}")
         self.logger.info(f"  Empty slices skipped: {skipped_empty}")
+        self.logger.info(f"  Existing slices skipped: {skipped_existing}")
         self.logger.info(f"  Split distribution:")
-        self.logger.info(f"    Train: {train_count} ({train_count/processed_slices*100:.1f}%)")
-        self.logger.info(f"    Validation: {val_count} ({val_count/processed_slices*100:.1f}%)")
-        self.logger.info(f"    Test: {test_count} ({test_count/processed_slices*100:.1f}%)")
+        self.logger.info(f"    Train: {train_count} ({train_count/max(processed_slices,1)*100:.1f}%)")
+        self.logger.info(f"    Validation: {val_count} ({val_count/max(processed_slices,1)*100:.1f}%)")
+        self.logger.info(f"    Test: {test_count} ({test_count/max(processed_slices,1)*100:.1f}%)")
         self.logger.info(f"  Total pairs saved: {len(saved_pairs)}")
         
         return saved_pairs

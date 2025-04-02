@@ -1,8 +1,14 @@
+#!/usr/bin/env python3
+"""
+Main module for NII Trainer - A modular framework for training cascaded neural networks
+on medical imaging data (NIfTI format).
+
+This module provides easy-to-use functions for running segmentation experiments with NII files
+in a Jupyter notebook or Python script environment.
+"""
+
 from pathlib import Path
 import logging
-import torch
-from torch.utils.data import DataLoader
-from nii_trainer.utils.logging_utils import setup_logger
 
 from nii_trainer.configs.config import (
     TrainerConfig,
@@ -12,36 +18,54 @@ from nii_trainer.configs.config import (
     TrainingConfig,
     LossConfig
 )
-from nii_trainer.data.preprocessing import NiiPreprocessor
-from nii_trainer.data.dataset import MultiClassSegDataset, PairedTransform
-from nii_trainer.models.cascaded_unet import FlexibleCascadedUNet
-from nii_trainer.models.trainer import ModelTrainer
-from nii_trainer.visualization.visualizer import SegmentationVisualizer
+from nii_trainer.utils import Experiment, setup_logger
 
-# Setup main logger with proper configuration
-logger = setup_logger(
-    experiment_name="liver_tumor_training",
-    save_dir=".",
-    level=logging.INFO
-)
-
-def main():
-    logger.info("=== Starting Liver-Tumor Segmentation Pipeline ===")
+def create_liver_tumor_config(
+    volume_dir="volume_pt1",
+    output_dir="processed_data",
+    img_size=(512, 512),
+    batch_size=16,
+    window_width=180,
+    window_level=50,
+    skip_empty=False,
+    slice_step=1,
+    train_val_test_split=(0.6, 0.2, 0.2),
+    learning_rate=1e-4,
+    epochs=100,
+    experiment_name="liver_tumor_cascade",
+):
+    """
+    Create a default configuration for liver-tumor segmentation.
     
-    # 1. Create configuration for liver-tumor cascade
-    logger.info("Creating model configuration...")
+    Args:
+        volume_dir: Directory containing volume files
+        output_dir: Directory to save processed data
+        img_size: Target image size (width, height)
+        batch_size: Batch size for training
+        window_width: CT window width
+        window_level: CT window level
+        skip_empty: Whether to skip slices without annotations
+        slice_step: Take every nth slice
+        train_val_test_split: Proportions for train/val/test split
+        learning_rate: Initial learning rate
+        epochs: Maximum number of training epochs
+        experiment_name: Name of experiment
+        
+    Returns:
+        Complete TrainerConfig for liver-tumor segmentation
+    """
     config = TrainerConfig(
         data=DataConfig(
-            base_dir=str(Path("volume_pt1").absolute()),
-            output_dir="processed_data",
+            base_dir=str(Path(volume_dir).absolute()),
+            output_dir=output_dir,
             classes=["background", "liver", "tumor"],
             class_map={"background": 0, "liver": 1, "tumor": 2},
-            img_size=(512, 512),
-            batch_size=8,
-            window_params={"window_width": 180, "window_level": 50},
-            skip_empty=True,
-            slice_step=4,
-            train_val_test_split=(0.7, 0.15, 0.15)  # Update to 70/15/15 split
+            img_size=img_size,
+            batch_size=batch_size,
+            window_params={"window_width": window_width, "window_level": window_level},
+            skip_empty=skip_empty,
+            slice_step=slice_step,
+            train_val_test_split=train_val_test_split
         ),
         cascade=CascadeConfig(
             stages=[
@@ -49,18 +73,18 @@ def main():
                 StageConfig(
                     input_classes=["background", "liver"],
                     target_class="liver",
-                    encoder_type="resnet18",
+                    encoder_type="mobilenet_v2",
                     num_layers=5,
                     is_binary=True,
                     threshold=0.5
                 ),
                 # Stage 2: Tumor segmentation within liver
                 StageConfig(
-                    input_classes=["liver"],  # Only one input class
+                    input_classes=["liver"],
                     target_class="tumor",
                     encoder_type="efficientnet",
                     num_layers=4,
-                    is_binary=True,  # Tumor is also binary within liver
+                    is_binary=True,
                     threshold=0.5
                 )
             ],
@@ -70,8 +94,8 @@ def main():
             pretrained=True
         ),
         training=TrainingConfig(
-            learning_rate=1e-4,
-            epochs=100,
+            learning_rate=learning_rate,
+            epochs=epochs,
             patience=10,
             mixed_precision=True
         ),
@@ -80,148 +104,140 @@ def main():
             class_weights={
                 "background": 1.0,
                 "liver": 2.0,
-                "tumor": 4.0  # Higher weight for tumor class due to small size
+                "tumor": 4.0  # Higher weight for tumor class
             }
         ),
-        experiment_name="liver_tumor_cascade"
+        experiment_name=experiment_name
     )
     
-    # 2. Create preprocessing pipeline
-    logger.info("Initializing preprocessing pipeline...")
-    preprocessor = NiiPreprocessor(config.data)
-    
-    # Process all volume-segmentation pairs
-    train_pairs = []
-    volume_dir = Path("volume_pt1")
-    segmentation_dir = Path("segmentations")
-    
-    # Process volumes and their corresponding segmentations
-    volume_files = sorted(list(volume_dir.glob("*.nii")))
-    logger.info(f"Found {len(volume_files)} volumes to process")
-    
-    for volume_path in volume_files:
-        logger.info(f"Processing volume: {volume_path.name}")
-        # Find corresponding segmentation file
-        seg_name = f"segmentation-{volume_path.stem.split('-')[-1]}.nii"
-        seg_path = segmentation_dir / seg_name
-        if seg_path.exists():
-            logger.info(f"Found matching segmentation: {seg_path.name}")
-            pairs = preprocessor.extract_slices(
-                volume_path=str(volume_path),
-                segmentation_path=str(seg_path),
-                output_dir=Path(config.data.output_dir)
-            )
-            train_pairs.extend(pairs)
-            logger.info(f"Extracted {len(pairs)} valid slices from volume")
-    
-    logger.info(f"Total number of processed image pairs: {len(train_pairs)}")
-    
-    # 3. Create datasets
-    logger.info("Creating training and validation datasets...")
-    num_train = int(0.8 * len(train_pairs))
-    train_pairs, val_pairs = train_pairs[:num_train], train_pairs[num_train:]
-    logger.info(f"Split data into {len(train_pairs)} training and {len(val_pairs)} validation samples")
-    
-    transform_train = PairedTransform(
-        img_size=config.data.img_size,
-        augment=True
-    )
-    transform_val = PairedTransform(
-        img_size=config.data.img_size,
-        augment=False
-    )
-    
-    logger.info("Initializing datasets...")
-    train_dataset = MultiClassSegDataset(
-        data_dir=str(Path(config.data.output_dir) / "train"),
-        class_map=config.data.class_map,
-        transform=transform_train,
-        balance=True
-    )
-    
-    val_dataset = MultiClassSegDataset(
-        data_dir=str(Path(config.data.output_dir) / "val"),
-        class_map=config.data.class_map,
-        transform=transform_val,
-        balance=False
-    )
-    
-    logger.info("Creating data loaders...")
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    # 4. Create and train model
-    logger.info("Initializing cascaded UNet model...")
-    model = FlexibleCascadedUNet(config.cascade)
-    model = model.to(config.training.device)
-    
-    # Create optimizer
-    logger.info("Setting up optimizer...")
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay
-    )
-    
-    trainer = ModelTrainer(
-        config=config,
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        optimizer=optimizer
-    )
-    
-    # 5. Train with curriculum learning
-    logger.info("Starting curriculum training...")
-    trainer.train(
-        stage_schedule=[
+    return config
+
+def get_default_curriculum_params():
+    """Get default curriculum learning parameters for cascaded network training."""
+    return {
+        'stage_schedule': [
             (0, 50),  # Train liver stage for 50 epochs
             (1, 50)   # Add tumor stage for 50 more epochs
         ],
-        learning_rates=[1e-3, 5e-4],
-        stage_freezing=[False, True]  # Freeze liver stage when training tumor stage
-    )
-    
-    # 6. Create visualizer for results
-    logger.info("Setting up visualization...")
-    visualizer = SegmentationVisualizer(
-        class_names=config.data.classes,
-        save_dir="visualizations"
-    )
-    
-    # Generate some validation predictions
-    logger.info("Generating validation predictions for visualization...")
-    model.eval()
-    with torch.no_grad():
-        for images, targets in val_loader:
-            outputs = model(images)
-            predictions = model.get_predictions(outputs)
-            
-            # Visualize batch
-            visualizer.visualize_batch(
-                images.cpu(),
-                predictions.cpu(),
-                targets,
-                max_samples=4,
-                save_dir="final_predictions"
-            )
-            logger.info("Saved visualization samples in 'final_predictions' directory")
-            break
-    
-    logger.info("=== Training pipeline completed successfully ===")
+        'learning_rates': [1e-3, 5e-4],  # Higher LR for first stage
+        'stage_freezing': [False, True]   # Freeze liver stage when training tumor stage
+    }
 
-if __name__ == "__main__":
-    main()
+def run_liver_tumor_segmentation(
+    volume_dir="volume_pt1",
+    segmentation_dir="segmentations",
+    output_dir="experiments",
+    experiment_name="liver_tumor_cascade",
+    process_data=True,
+    force_overwrite=False,
+    use_curriculum=True,
+    img_size=(512, 512),
+    batch_size=32,
+    window_width=180,
+    window_level=50,
+    slice_step=1,
+    skip_empty=False,
+    learning_rate=1e-4,
+    epochs=100,
+    custom_config=None,
+    custom_curriculum_params=None,
+    verbose=True
+):
+    """
+    Run a complete liver-tumor segmentation experiment.
+    
+    This function handles the entire pipeline from data preprocessing to model training
+    and evaluation. It's designed to be easy to use in Jupyter notebooks or scripts.
+    
+    Args:
+        volume_dir: Directory containing volume NIfTI files
+        segmentation_dir: Directory containing segmentation NIfTI files
+        output_dir: Base directory for experiment outputs
+        experiment_name: Name of the experiment
+        process_data: Whether to process the NIfTI data
+        force_overwrite: Whether to overwrite existing processed data
+        use_curriculum: Whether to use curriculum learning
+        img_size: Target image size (width, height)
+        batch_size: Batch size for training
+        window_width: CT window width
+        window_level: CT window level
+        slice_step: Take every nth slice
+        skip_empty: Whether to skip slices without annotations
+        learning_rate: Initial learning rate
+        epochs: Maximum number of training epochs
+        custom_config: Optional custom TrainerConfig (overrides all other config params)
+        custom_curriculum_params: Optional custom curriculum parameters
+        verbose: Whether to print detailed logs
+        
+    Returns:
+        Experiment instance with trained model and results
+    """
+    # Setup logger
+    log_level = logging.INFO if verbose else logging.WARNING
+    logger = setup_logger(
+        experiment_name=experiment_name,
+        save_dir="logs",
+        level=log_level
+    )
+    
+    logger.info("=== Starting NII Trainer Pipeline ===")
+    logger.info(f"Experiment: {experiment_name}")
+    logger.info(f"Volume directory: {volume_dir}")
+    logger.info(f"Segmentation directory: {segmentation_dir}")
+    
+    # Use custom config if provided, otherwise create default
+    config = custom_config
+    if config is None:
+        config = create_liver_tumor_config(
+            volume_dir=volume_dir,
+            img_size=img_size,
+            batch_size=batch_size,
+            window_width=window_width,
+            window_level=window_level,
+            skip_empty=skip_empty,
+            slice_step=slice_step,
+            learning_rate=learning_rate,
+            epochs=epochs,
+            experiment_name=experiment_name
+        )
+    
+    # Get curriculum parameters
+    curriculum_params = custom_curriculum_params
+    if use_curriculum and curriculum_params is None:
+        curriculum_params = get_default_curriculum_params()
+    
+    # Create and run experiment
+    experiment = Experiment(
+        config=config,
+        experiment_name=experiment_name,
+        base_dir=output_dir,
+        logger=logger
+    )
+    
+    # Run the complete pipeline
+    results = experiment.run(
+        volume_dir=volume_dir,
+        segmentation_dir=segmentation_dir,
+        process_data=process_data,
+        curriculum=use_curriculum,
+        curriculum_params=curriculum_params if use_curriculum else None,
+        force_overwrite=force_overwrite
+    )
+    
+    logger.info("=== NII Trainer Pipeline completed successfully ===")
+    
+    return experiment
+
+def create_custom_experiment(config, **kwargs):
+    """
+    Create a custom experiment with a specified configuration.
+    
+    Args:
+        config: TrainerConfig object with experiment configuration
+        **kwargs: Additional parameters to pass to Experiment constructor
+        
+    Returns:
+        Configured Experiment instance (not run yet)
+    """
+    experiment = Experiment(config=config, **kwargs)
+    return experiment

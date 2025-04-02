@@ -40,7 +40,7 @@ class DataConfig:
     class_map: Dict[str, int]  # Mapping of class names to indices
     img_size: Tuple[int, int] = (512, 512)
     batch_size: int = 16
-    num_workers: int = 4
+    num_workers: int = 0  # -1 means use all available CPU cores
     train_val_test_split: Tuple[float, float, float] = (0.7, 0.15, 0.15)
     slice_step: int = 1
     skip_empty: bool = True
@@ -55,11 +55,22 @@ class TrainingConfig:
     epochs: int = 60
     patience: int = 11
     reduce_lr_patience: int = 3
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = None  # Will be determined during post_init
     mixed_precision: bool = True
     optimizer_type: str = "adam"
     scheduler_type: str = "plateau"
     batch_accumulation: int = 1
+    
+    def __post_init__(self):
+        # Determine the most appropriate device automatically
+        if self.device is None:
+            if torch.cuda.is_available():
+                if torch.cuda.device_count() > 1:
+                    self.device = "cuda:0"  # Use first GPU by default in multi-GPU setup
+                else:
+                    self.device = "cuda"
+            else:
+                self.device = "cpu"
 
 @dataclass
 class LossConfig:
