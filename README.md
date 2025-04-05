@@ -2,7 +2,6 @@
 
 A powerful and flexible framework for training cascaded neural networks on medical imaging data (NIfTI format). This framework implements a novel binary-first approach for hierarchical multi-class segmentation, where the initial stage performs foreground/background separation before subsequent stages handle fine-grained class segmentation.
 
-![NII Trainer Overview](https://via.placeholder.com/800x400?text=NII+Trainer+Overview)
 
 ## 🌟 Key Features
 
@@ -842,33 +841,6 @@ experiment.export_model(
 )
 ```
 
-## 🧪 Experimental Features
-
-NII Trainer also includes experimental features that are actively being developed:
-
-- **Domain Adaptation**: Adapt models trained on one dataset to perform well on another
-- **Uncertainty Estimation**: Quantify model uncertainty using Monte Carlo Dropout
-- **Active Learning**: Prioritize annotation of most informative samples
-- **Federated Learning**: Train models across multiple sites without sharing data
-- **Semi-Supervised Learning**: Leverage unlabeled data to improve segmentation
-
-## 🤝 Contributing
-
-Contributions to NII Trainer are welcome! Please check our [Contributing Guidelines](CONTRIBUTING.md) for details on how to submit pull requests, report issues, and contribute to development.
-
-### Development Roadmap
-
-- **Version 0.2.0** (Upcoming):
-  - Support for 3D models
-  - Integration with MONAI framework
-  - Additional encoder architectures
-  - Performance optimizations
-
-- **Version 0.3.0**:
-  - Cloud integration
-  - Distributed training support
-  - Web-based visualization dashboard
-  - Pre-trained model zoo
 
 ## 📖 Citation
 
