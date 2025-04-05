@@ -126,8 +126,8 @@ def get_default_curriculum_params():
     """Get default curriculum learning parameters for cascaded network training."""
     return {
         'stage_schedule': [
-            (0, 50),  # Train liver stage for 50 epochs
-            (1, 50)   # Train tumor stage for 50 more epochs
+            (0, 10),  # Train liver stage for 50 epochs
+            (10, 30)   # Train tumor stage for 50 more epochs
         ],
         'learning_rates': [1e-3, 5e-4],  # Higher LR for first stage, lower for second
         'stage_freezing': [False, True]   # Second stage freezes the first stage
@@ -148,7 +148,7 @@ def run_liver_tumor_segmentation(
     slice_step=1,
     skip_empty=False,
     learning_rate=1e-4,
-    epochs=100,
+    epochs=30,
     batch_accumulation=1,
     custom_config=None,
     custom_curriculum_params=None,
