@@ -137,25 +137,42 @@ def train_with_curriculum(
         Trained trainer instance
     """
     if logger:
-        logger.info("Starting curriculum training...")
-        
-        for i, (stage_idx, num_epochs) in enumerate(stage_schedule):
-            logger.info(f"Stage {i+1}: Training stage {stage_idx+1} for {num_epochs} epochs")
-            if learning_rates and i < len(learning_rates):
-                logger.info(f"  Learning rate: {learning_rates[i]}")
-            if stage_freezing and i < len(stage_freezing):
-                logger.info(f"  Freeze previous stages: {stage_freezing[i]}")
+        logger.info("Using curriculum learning approach")
+        logger.info(f"Stage schedule: {stage_schedule}")
+        logger.info(f"Learning rates: {learning_rates}")
+        logger.info(f"Stage freezing: {stage_freezing}")
     
     # Create checkpoint directory
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(exist_ok=True)
     
-    # Train with curriculum
-    trainer.trainer(
-        stage_schedule=stage_schedule,
-        learning_rates=learning_rates,
-        stage_freezing=stage_freezing
-    )
+    # Ensure trainer has curriculum_manager initialized
+    if not hasattr(trainer, 'curriculum_manager') or trainer.curriculum_manager is None:
+        if logger:
+            logger.info("Configuring curriculum learning")
+        
+        # Configure curriculum with provided parameters
+        curriculum_params = {
+            'stage_schedule': stage_schedule,
+            'learning_rates': learning_rates,
+            'stage_freezing': stage_freezing
+        }
+        
+        # Use the optimized train_with_curriculum method
+        trainer.train_with_curriculum(
+            stage_schedule=stage_schedule,
+            learning_rates=learning_rates,
+            stage_freezing=stage_freezing
+        )
+    else:
+        # Use existing curriculum configuration
+        if logger:
+            logger.info("Using existing curriculum configuration")
+        trainer.train_with_curriculum(
+            stage_schedule=stage_schedule,
+            learning_rates=learning_rates,
+            stage_freezing=stage_freezing
+        )
     
     if logger:
         logger.info("Curriculum training completed")

@@ -97,6 +97,82 @@ class MetricsManager:
                 
         return display_dict
     
+    def format_metrics_display(
+        self,
+        metrics: Dict[str, Any],
+        ordered_metrics: Optional[List[str]] = None,
+        show_stage_metrics: bool = True,
+        active_stages: Optional[List[int]] = None
+    ) -> Dict[str, str]:
+        """
+        Format metrics for display in progress bar with appropriate ordering.
+        
+        Args:
+            metrics: Dictionary of metrics
+            ordered_metrics: Optional list of metrics to prioritize in display
+            show_stage_metrics: Whether to show per-stage metrics
+            active_stages: Optional list of active stage indices (for curriculum learning)
+            
+        Returns:
+            Dictionary of formatted metrics for display
+        """
+        display_dict = {}
+        
+        # Default ordered metrics if not provided
+        if ordered_metrics is None:
+            ordered_metrics = ['base_loss', 'loss_w_r', 'total_loss', 'dice', 'precision', 'recall', 'jaccard']
+        
+        # Add the direct metrics first
+        for metric_name in ordered_metrics:
+            if metric_name in metrics:
+                value = metrics[metric_name]
+                if torch.is_tensor(value):
+                    value = value.item()
+                
+                # Validate value
+                if np.isfinite(value) and abs(value) < 1e6:
+                    # Format differently based on metric type
+                    if 'loss' in metric_name:
+                        display_dict[metric_name] = f"{value:.4f}"
+                    else:
+                        display_dict[metric_name] = f"{value:.3f}"
+        
+        # Add per-stage metrics if requested
+        if show_stage_metrics:
+            # Get all stage keys from metrics
+            stage_keys = [k for k in metrics.keys() if k.startswith('stage') and '_dice' in k]
+            stage_indices = []
+            
+            # Extract stage indices
+            for key in stage_keys:
+                try:
+                    # Format is 'stage{idx}_metric'
+                    stage_idx = int(key.split('_')[0].replace('stage', '')) - 1
+                    if stage_idx not in stage_indices:
+                        stage_indices.append(stage_idx)
+                except (ValueError, IndexError):
+                    continue
+            
+            # If active_stages is provided, only show those stages
+            if active_stages is not None:
+                stage_indices = [idx for idx in stage_indices if idx in active_stages]
+            
+            # Sort stage indices
+            stage_indices.sort()
+            
+            # Add dice scores for each stage
+            for stage_idx in stage_indices:
+                stage_key = f"stage{stage_idx+1}_dice"
+                if stage_key in metrics:
+                    value = metrics[stage_key]
+                    if torch.is_tensor(value):
+                        value = value.item()
+                    
+                    if np.isfinite(value) and abs(value) < 1e6:
+                        display_dict[f"S{stage_idx+1}_dice"] = f"{value:.3f}"
+        
+        return display_dict
+        
     def average_metrics(self, metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
         """
         Average a list of metric dictionaries.
@@ -124,6 +200,91 @@ class MetricsManager:
         current_stage_metrics = self._extract_current_stage_metrics(metrics_list)
         avg_metrics.update(current_stage_metrics)
                 
+        return avg_metrics
+    
+    def get_epoch_averages(
+        self,
+        all_metrics: List[Dict[str, Any]],
+        num_batches: int,
+        prioritize_metrics: Optional[List[str]] = None,
+        active_stages: Optional[List[int]] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate average metrics across all batches in an epoch.
+        
+        Args:
+            all_metrics: List of metric dictionaries from all batches
+            num_batches: Number of batches in the epoch
+            prioritize_metrics: Optional list of metrics to prioritize in calculation
+            active_stages: Optional list of active stage indices (for curriculum learning)
+            
+        Returns:
+            Dictionary of averaged metrics
+        """
+        if not all_metrics:
+            return {}
+            
+        avg_metrics = {}
+        
+        # Default prioritized metrics if not provided
+        if prioritize_metrics is None:
+            prioritize_metrics = ['total_loss', 'base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']
+        
+        # Calculate averages for prioritized metrics first
+        for metric_name in prioritize_metrics:
+            values = []
+            for m in all_metrics:
+                if metric_name in m:
+                    value = m[metric_name]
+                    if torch.is_tensor(value):
+                        value = value.item()
+                    
+                    if np.isfinite(value) and abs(value) < 1e9:
+                        values.append(value)
+            
+            if values:
+                avg_metrics[metric_name] = np.mean(values)
+        
+        # Handle stage-specific metrics
+        # Identify all stage metrics in the data
+        stage_metrics = {}
+        
+        for m in all_metrics:
+            for key in m:
+                if key.startswith('stage') and '_' in key:
+                    parts = key.split('_')
+                    stage_idx_str = parts[0].replace('stage', '')
+                    
+                    try:
+                        stage_idx = int(stage_idx_str) - 1  # Convert to 0-based index
+                        metric_name = '_'.join(parts[1:])
+                        
+                        # Skip stages not in active_stages if provided
+                        if active_stages is not None and stage_idx not in active_stages:
+                            continue
+                            
+                        if stage_idx not in stage_metrics:
+                            stage_metrics[stage_idx] = {}
+                            
+                        if metric_name not in stage_metrics[stage_idx]:
+                            stage_metrics[stage_idx][metric_name] = []
+                            
+                        value = m[key]
+                        if torch.is_tensor(value):
+                            value = value.item()
+                            
+                        if np.isfinite(value) and abs(value) < 1e9:
+                            stage_metrics[stage_idx][metric_name].append(value)
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Calculate averages for stage metrics
+        for stage_idx, metrics in stage_metrics.items():
+            for metric_name, values in metrics.items():
+                if values:
+                    key = f"stage{stage_idx+1}_{metric_name}"
+                    avg_metrics[key] = np.mean(values)
+        
         return avg_metrics
     
     def _is_numeric_metric(self, value: Any) -> bool:

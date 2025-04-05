@@ -5,6 +5,8 @@ import time
 import torch
 import os
 
+from nii_trainer.models.curriculum_manager import CurriculumManager
+
 from ..configs.config import TrainerConfig
 from ..data import (
     process_volume_and_segmentation,
@@ -224,13 +226,14 @@ class Experiment:
             return
         
         self.logger.info("Starting model training...")
+        self.logger.info(f"Using curriculum learning: {curriculum}")
         
-        # Train the model using the new modular trainer
+        # Train the model using the appropriate method based on curriculum flag
         if curriculum:
             if curriculum_params is None:
                 curriculum_params = {}
                 
-            # Default curriculum parameters
+            # Default curriculum parameters with strict stage progression
             stage_schedule = curriculum_params.get('stage_schedule', [
                 (0, 50),  # Train first stage for 50 epochs
                 (1, 50)   # Train second stage for 50 epochs
@@ -248,19 +251,35 @@ class Experiment:
             self.logger.info(f"Learning rates: {learning_rates}")
             self.logger.info(f"Stage freezing: {stage_freezing}")
             
-            # Use the new curriculum training method
+            # Initialize curriculum manager if needed
+            if not hasattr(self.trainer, 'curriculum_manager') or self.trainer.curriculum_manager is None:
+                self.trainer.curriculum_manager = CurriculumManager(
+                    config=self.trainer.config.training,
+                    model=self.trainer.model,
+                    logger=self.logger
+                )
+            
+            # Configure curriculum with the updated parameters
+            self.trainer.curriculum_manager.configure_curriculum({
+                'stage_schedule': stage_schedule,
+                'learning_rates': learning_rates,
+                'stage_freezing': stage_freezing
+            })
+            
+            # Use the curriculum training method
             training_results = self.trainer.train_with_curriculum(
                 stage_schedule=stage_schedule,
                 learning_rates=learning_rates,
                 stage_freezing=stage_freezing
             )
         else:
-            # Use the standard training method
+            # Use the standard training method without curriculum
+            self.logger.info("Using standard training approach (no curriculum)")
             training_results = self.trainer.train()
         
         self.logger.info("Model training completed")
         return training_results
-        
+    
     def evaluate(self):
         """
         Evaluate the trained model.

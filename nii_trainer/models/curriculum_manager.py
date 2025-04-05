@@ -39,6 +39,9 @@ class CurriculumManager:
         
         self.current_epoch = 0
         self.active_stages = [0]  # Start with just the first stage by default
+        self.frozen_stages = []   # Keep track of which stages are frozen
+        # Keep track of the current primary stage (for metrics display)
+        self.current_primary_stage = 0
         
     def configure_curriculum(self, params: Dict):
         """
@@ -67,6 +70,7 @@ class CurriculumManager:
             
         # Start with just the first stage
         self.active_stages = [0]
+        self.current_primary_stage = 0
         
     def update_active_stages(self, curriculum_stage: int) -> List[int]:
         """
@@ -89,11 +93,14 @@ class CurriculumManager:
         if curriculum_stage < len(schedule):
             stage_idx, _ = schedule[curriculum_stage]
             
-            # Update active stages based on curriculum progression
-            # In most cases, we want to include all stages up to the current one
-            self.active_stages = list(range(stage_idx + 1))
+            # Update the current primary stage (the one we're actually training)
+            self.current_primary_stage = stage_idx
             
-            self.logger.info(f"Curriculum stage {curriculum_stage+1}: Active model stages = {self.active_stages}")
+            # In strict curriculum mode, we only activate the current stage
+            # This improves performance and reduces GPU memory usage
+            self.active_stages = [stage_idx]
+            
+            self.logger.info(f"Curriculum stage {curriculum_stage+1}: Active model stage = {stage_idx+1}")
             
             return self.active_stages
         else:
@@ -112,51 +119,81 @@ class CurriculumManager:
         if not self.active_stages:
             return self.config.learning_rate
             
-        # Get learning rate based on most recently activated stage
-        latest_stage = max(self.active_stages)
-        
+        # Get learning rate for current primary stage
         if 'learning_rates' not in self.curriculum_params:
             return self.config.learning_rate
             
         learning_rates = self.curriculum_params['learning_rates']
         
-        if latest_stage < len(learning_rates):
-            return learning_rates[latest_stage]
+        # Use the learning rate for the current curriculum stage
+        current_schedule_idx = 0
+        for i, (stage_idx, _) in enumerate(self.curriculum_params['stage_schedule']):
+            if stage_idx == self.current_primary_stage:
+                current_schedule_idx = i
+                break
+                
+        if current_schedule_idx < len(learning_rates):
+            return learning_rates[current_schedule_idx]
         else:
             return learning_rates[-1]  # Use last defined learning rate
             
     def apply_stage_freezing(self):
-        """Apply freezing to model stages based on curriculum."""
-        if 'stage_freezing' not in self.curriculum_params:
-            return
-            
-        freezing_config = self.curriculum_params['stage_freezing']
+        """Freeze all stages except the current primary stage.
         
-        if not freezing_config or max(self.active_stages) >= len(freezing_config):
-            # No freezing config or current stage exceeds config length
-            return
-            
-        # Get freezing state for current active stage
-        freeze_previous = freezing_config[max(self.active_stages)]
+        This implementation unconditionally freezes every stage
+        other than the current primary stage.
+        """
+        # Reset the frozen stages list.
+        self.frozen_stages = []
         
-        if not freeze_previous:
-            # Unfreeze all stages
-            for stage in self.model.stages:
+        # Freeze every stage except the current primary stage.
+        for stage_idx, stage in enumerate(self.model.stages):
+            if stage_idx == self.current_primary_stage:
+                # Unfreeze the active stage.
                 for param in stage.parameters():
                     param.requires_grad = True
-            self.logger.info("All stages unfrozen")
-            return
-            
-        # Freeze all stages except the current one
-        for stage_idx, stage in enumerate(self.model.stages):
-            if stage_idx < max(self.active_stages):
+                self.logger.info(f"Stage {stage_idx+1} active and unfrozen")
+            else:
+                # Freeze all other stages.
                 for param in stage.parameters():
                     param.requires_grad = False
                 self.logger.info(f"Stage {stage_idx+1} frozen")
-            else:
-                for param in stage.parameters():
-                    param.requires_grad = True
-                self.logger.info(f"Stage {stage_idx+1} active")
+                self.frozen_stages.append(stage_idx)
+        
+        self.logger.info(f"Active stage: {self.current_primary_stage+1}")
+        if self.frozen_stages:
+            self.logger.info(f"Frozen stages: {[s+1 for s in self.frozen_stages]}")
+        
+        return self.frozen_stages
+
+
+
+    def get_active_and_frozen_stages(self) -> Tuple[List[int], List[int]]:
+        """
+        Returns both active and frozen stages.
+        
+        Returns:
+            Tuple of (active stages indices, frozen stages indices)
+        """
+        return self.active_stages, self.frozen_stages
+    
+    def get_current_primary_stage(self) -> int:
+        """
+        Returns the current primary stage being trained.
+        
+        Returns:
+            Index of the current primary stage
+        """
+        return self.current_primary_stage
+        
+    def are_stages_frozen(self) -> bool:
+        """
+        Check if any stages are currently frozen.
+        
+        Returns:
+            Boolean indicating if any stages are frozen
+        """
+        return len(self.frozen_stages) > 0
 
     def format_metrics_for_logging(self, metrics: Dict[str, Any]) -> str:
         """

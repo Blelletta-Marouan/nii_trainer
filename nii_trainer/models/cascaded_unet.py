@@ -366,63 +366,65 @@ class FlexibleCascadedUNet(nn.Module):
             
         self.logger.info("\nModel initialization complete")
         
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x, active_stages=None):
         """
-        Forward pass returning outputs from all stages.
-        Args:
-            x: Input tensor [B, C, H, W]
-        Returns:
-            List of outputs from each stage [B, 1, H, W] or [B, num_classes, H, W]
-        """
-        stage_outputs = []
-        stage_input = x
-        input_size = x.shape[-2:]  # Remember original input size
+        Forward pass through the model.
         
-        for i, stage in enumerate(self.stages):
-            try:
-                # Current stage prediction
-                stage_out = stage(stage_input)
+        Args:
+            x: Input tensor (B, C, H, W)
+            active_stages: Optional list of stage indices to compute (for curriculum learning)
+            
+        Returns:
+            List of predictions from each stage
+        """
+        outputs = []
+        batch_size = x.shape[0]
+        image_size = x.shape[2:]
+
+        # Determine which stages to run
+        all_stages = range(len(self.stages))
+        stages_to_run = active_stages if active_stages is not None else all_stages
+        
+        # Create empty placeholders for all stages to maintain output structure
+        placeholders = [torch.zeros((batch_size, 1, *image_size), device=x.device) for _ in all_stages]
+        outputs = placeholders.copy()  # Start with placeholders for all stages
+        
+        # Previous stage prediction cache for memory efficiency
+        prev_stage_pred = None
+        
+        # Process only active stages
+        for stage_idx in all_stages:
+            if stage_idx not in stages_to_run:
+                continue
                 
-                # Ensure output is at original resolution
-                if stage_out.shape[-2:] != input_size:
-                    stage_out = F.interpolate(
-                        stage_out, 
-                        size=input_size, 
-                        mode='bilinear', 
-                        align_corners=False
-                    )
+            # Free up memory from previous inactive stages
+            if prev_stage_pred is not None and stage_idx - 1 not in stages_to_run:
+                prev_stage_pred = None
+                torch.cuda.empty_cache()  # Release unused GPU memory
+            
+            # Get stage input
+            if stage_idx == 0:
+                # First stage just takes original input
+                stage_input = x
+            else:
+                # Update prev_stage_pred if needed
+                if prev_stage_pred is None:
+                    prev_stage_pred = (torch.sigmoid(outputs[stage_idx - 1]) > 0.5).float()
+                # Concatenate original input with previous stage mask
+                stage_input = torch.cat([x, prev_stage_pred], dim=1)
+            
+            # Get stage output
+            with torch.set_grad_enabled(stage_idx in stages_to_run):  # Only compute gradients for active stages
+                stage_output = self.stages[stage_idx](stage_input)
+                outputs[stage_idx] = stage_output
                 
-                stage_outputs.append(stage_out)
-                
-                if self.logger and self.logger.level <= logging.DEBUG:
-                    self.logger.debug(f"Stage {i+1} output shape: {stage_out.shape}")
-                
-                # For first stage (binary), convert output to binary mask
-                if stage.is_binary:
-                    binary_mask = torch.sigmoid(stage_out) > stage.config.threshold
-                    stage_input = torch.cat([x, binary_mask.float()], dim=1)
+                # Cache prediction for next stage if needed
+                if stage_idx + 1 in stages_to_run:
+                    prev_stage_pred = (torch.sigmoid(stage_output) > 0.5).float()
                 else:
-                    # For multi-class stages, concatenate probabilities
-                    stage_input = torch.cat([x] + [s.sigmoid() for s in stage_outputs], dim=1)
-            except RuntimeError as e:
-                # If we encounter a channel dimension error, handle it gracefully
-                if "channels" in str(e):
-                    # For testing/inference: return dummy outputs of proper shape
-                    if not self.training:
-                        # Create dummy output with proper shape
-                        dummy_output = torch.zeros(
-                            (x.size(0), 1, x.size(2), x.size(3)), 
-                            device=x.device
-                        )
-                        return [dummy_output] * len(self.stages)
-                    else:
-                        # During training, we need to raise the error
-                        raise
-                else:
-                    # Non-channel related error, just reraise
-                    raise
-                
-        return stage_outputs
+                    prev_stage_pred = None
+        
+        return outputs
     
     def get_predictions(self, outputs: List[torch.Tensor], thresholds: Optional[List[float]] = None) -> torch.Tensor:
         """

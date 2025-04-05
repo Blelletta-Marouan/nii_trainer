@@ -127,10 +127,10 @@ def get_default_curriculum_params():
     return {
         'stage_schedule': [
             (0, 50),  # Train liver stage for 50 epochs
-            (1, 50)   # Add tumor stage for 50 more epochs
+            (1, 50)   # Train tumor stage for 50 more epochs
         ],
-        'learning_rates': [1e-3, 5e-4],  # Higher LR for first stage
-        'stage_freezing': [False, True]   # Freeze liver stage when training tumor stage
+        'learning_rates': [1e-3, 5e-4],  # Higher LR for first stage, lower for second
+        'stage_freezing': [False, True]   # Second stage freezes the first stage
     }
 
 def run_liver_tumor_segmentation(
@@ -196,6 +196,7 @@ def run_liver_tumor_segmentation(
     logger.info(f"Experiment: {experiment_name}")
     logger.info(f"Volume directory: {volume_dir}")
     logger.info(f"Segmentation directory: {segmentation_dir}")
+    logger.info(f"Using curriculum learning: {use_curriculum}")
     
     # Use custom config if provided, otherwise create default
     config = custom_config
@@ -214,10 +215,17 @@ def run_liver_tumor_segmentation(
             experiment_name=experiment_name
         )
     
+    # Add a use_curriculum flag to the config for clarity
+    if not hasattr(config, 'use_curriculum'):
+        config.use_curriculum = use_curriculum
+    
     # Get curriculum parameters
     curriculum_params = custom_curriculum_params
     if use_curriculum and curriculum_params is None:
         curriculum_params = get_default_curriculum_params()
+    elif not use_curriculum:
+        # Ensure curriculum is disabled when use_curriculum=False
+        curriculum_params = None
     
     # Create and run experiment
     experiment = Experiment(
@@ -232,8 +240,8 @@ def run_liver_tumor_segmentation(
         volume_dir=volume_dir,
         segmentation_dir=segmentation_dir,
         process_data=process_data,
-        curriculum=use_curriculum,
-        curriculum_params=curriculum_params if use_curriculum else None,
+        curriculum=use_curriculum,  # Pass the flag to experiment.run
+        curriculum_params=curriculum_params,  # This will be None if use_curriculum=False
         force_overwrite=force_overwrite
     )
     

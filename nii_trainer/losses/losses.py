@@ -245,7 +245,8 @@ class CascadedLossWithReward(nn.Module):
     def forward(
         self,
         predictions: List[torch.Tensor],
-        target: torch.Tensor
+        target: torch.Tensor,
+        skip_stages: Optional[List[int]] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass computing loss for all stages.
@@ -253,6 +254,7 @@ class CascadedLossWithReward(nn.Module):
         Args:
             predictions: List of predictions from each stage (B, C, H, W)
             target: Ground truth target (B, C, H, W) or (B, H, W)
+            skip_stages: Optional list of stage indices to skip (for curriculum learning)
             
         Returns:
             Dictionary containing total loss and stage-wise metrics
@@ -261,116 +263,78 @@ class CascadedLossWithReward(nn.Module):
         metrics_dict = {}
         stage_metrics_list = []
         
-        self.logger.debug(f"Computing loss for {len(predictions)} stages")
+        # Initialize skip_stages if not provided
+        if skip_stages is None:
+            skip_stages = []
+
+        # Early optimization: If all stages are skipped, return zeros
+        if len(skip_stages) == len(predictions):
+            device = target.device
+            return {
+                'total_loss': torch.tensor(0.0, device=device),
+                'base_loss': torch.tensor(0.0, device=device),
+                'loss_w_r': torch.tensor(0.0, device=device),
+                'dice': torch.tensor(0.0, device=device),
+                'precision': torch.tensor(0.0, device=device),
+                'recall': torch.tensor(0.0, device=device),
+                'jaccard': torch.tensor(0.0, device=device)
+            }
         
         # Ensure target has same shape as predictions
         if target.dim() == 3:
             target = target.unsqueeze(1)
         
-        # Validate input predictions
-        if not predictions or not all(torch.isfinite(p).all() for p in predictions):
-            self.logger.warning("Invalid predictions detected, using default loss")
-            return {'total_loss': torch.tensor(1.0, device=target.device)}
+        # Get active stages
+        active_stages = [i for i in range(len(predictions)) if i not in skip_stages]
+        if not active_stages:
+            return {'total_loss': torch.tensor(0.0, device=target.device)}
         
-        # Active stages for curriculum learning (set by trainer)
-        active_stages = getattr(self, 'active_stages', list(range(len(predictions))))
-        
-        # Track metrics from the most advanced active stage for reporting
-        # (ensures metrics reflect current training focus, not all stages)
-        current_active_stage = max(active_stages) if active_stages else 0
+        # Track highest active stage for metric reporting
+        current_active_stage = max(active_stages)
         
         # Process each stage
         for stage, pred in enumerate(predictions):
+            # Skip stages not in curriculum
+            if stage in skip_stages:
+                continue
+                
             # Get stage configuration
             weight = (self.config.stage_weights[stage] 
                      if self.config.stage_weights and stage < len(self.config.stage_weights) else 1.0)
             threshold = (self.config.threshold_per_class[stage] 
                         if self.config.threshold_per_class and stage < len(self.config.threshold_per_class) else 0.5)
             
-            # Compute stage metrics with error handling
+            # Skip computation for placeholders (when using curriculum)
+            if pred.shape[1] == 1 and pred.sum() == 0 and pred.shape[2:] != target.shape[2:]:
+                continue
+            
             try:
-                stage_metrics = self.compute_stage_loss(
-                    pred, target, weight, threshold
-                )
+                # Compute metrics only for active stages
+                stage_metrics = self.compute_stage_loss(pred, target, weight, threshold)
                 
-                # Add to total loss if valid
+                # Add to total loss
                 if torch.isfinite(stage_metrics['total_loss']):
                     total_loss += stage_metrics['total_loss']
-                else:
-                    self.logger.warning(f"Stage {stage+1} produced invalid loss, using default")
-                    total_loss += torch.tensor(0.5, device=pred.device)
                 
-                # Store metrics with stage prefix
+                # Store stage-specific metrics
                 for k, v in stage_metrics.items():
                     metrics_dict[f'stage{stage+1}_{k}'] = v
                 
-                # Ensure all required metrics are present with defaults if missing
-                required_metrics = ['base_loss', 'total_loss', 'dice', 'precision', 'recall', 'jaccard', 'reward']
-                metrics_to_store = {}
+                # For the current active stage, store metrics without prefix for display
+                if stage == current_active_stage:
+                    for k, v in stage_metrics.items():
+                        if k != 'total_loss':  # Don't overwrite total_loss
+                            metrics_dict[k] = v
                 
-                for key in required_metrics:
-                    if key in stage_metrics:
-                        metrics_to_store[key] = stage_metrics[key]
-                    else:
-                        # Provide default values for missing metrics
-                        metrics_to_store[key] = torch.tensor(0.0, device=pred.device)
-                        self.logger.warning(f"Missing '{key}' in stage {stage+1} metrics, using default value 0.0")
-                
-                # Store stage metrics for aggregation
-                metrics_to_store['stage'] = stage
-                stage_metrics_list.append(metrics_to_store)
+                stage_metrics['stage'] = stage
+                stage_metrics_list.append(stage_metrics)
                 
             except Exception as e:
-                self.logger.error(f"Error in stage {stage+1}: {e}")
-                # Add a default loss contribution
-                total_loss += torch.tensor(0.5, device=pred.device if torch.is_tensor(pred) else "cpu")
-                
-                # Add default metrics for this stage
-                default_device = pred.device if torch.is_tensor(pred) else "cpu"
-                default_metrics = {
-                    'stage': stage,
-                    'base_loss': torch.tensor(0.5, device=default_device),
-                    'total_loss': torch.tensor(0.5, device=default_device),
-                    'dice': torch.tensor(0.0, device=default_device),
-                    'precision': torch.tensor(0.0, device=default_device),
-                    'recall': torch.tensor(0.0, device=default_device),
-                    'jaccard': torch.tensor(0.0, device=default_device),
-                    'reward': torch.tensor(0.0, device=default_device)
-                }
-                
-                # Add default metrics with stage prefix
-                for k, v in default_metrics.items():
-                    if k != 'stage':
-                        metrics_dict[f'stage{stage+1}_{k}'] = v
-                
-                # Add to stage metrics list
-                stage_metrics_list.append(default_metrics)
+                self.logger.error(f"Error computing metrics for stage {stage+1}: {e}")
+                total_loss += torch.tensor(0.5, device=pred.device)
         
         # Add total loss to metrics
         metrics_dict['total_loss'] = total_loss
-        
-        # Use only the current active stage for reported metrics
-        # This ensures metrics reflect what's currently being trained
-        try:
-            current_stage_metrics = [m for m in stage_metrics_list if m['stage'] == current_active_stage]
-            
-            if current_stage_metrics:
-                # Add the current stage metrics without stage prefix
-                # These are the metrics that will be displayed in the progress bar
-                metrics = current_stage_metrics[0]
-                for key in ['base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard', 'reward']:
-                    if key in metrics:
-                        metrics_dict[key] = metrics[key]
-                    elif key == 'loss_w_r' and 'total_loss' in metrics:
-                        # Fallback: If loss_w_r not available, use total_loss
-                        metrics_dict[key] = metrics['total_loss']
-        except Exception as e:
-            self.logger.error(f"Error aggregating stage metrics: {e}")
-            # Add default metrics for display if aggregation fails
-            device = target.device
-            for key in ['base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
-                metrics_dict[key] = torch.tensor(0.0, device=device)
-            
-        self.logger.debug(f"Total loss: {total_loss:.4f}")
+        metrics_dict['current_stage'] = current_active_stage + 1
         
         return metrics_dict

@@ -180,15 +180,17 @@ class ModelTrainer:
         total_loss = 0
         all_metrics = []
         
-        # Initialize running averages for metrics
-        running_metrics = {
-            'base_loss': 0.0,
-            'loss_w_r': 0.0,
-            'dice': 0.0,
-            'precision': 0.0,
-            'recall': 0.0,
-            'jaccard': 0.0
-        }
+        # Determine if we're using curriculum learning with stage freezing
+        using_curriculum_freezing = (
+            hasattr(self, 'curriculum_manager') and 
+            self.curriculum_manager is not None and
+            self.curriculum_manager.are_stages_frozen()
+        )
+        
+        # Get active stages for curriculum
+        active_stages = None
+        if using_curriculum_freezing:
+            active_stages, _ = self.curriculum_manager.get_active_and_frozen_stages()
         
         with tqdm(self.train_loader, desc=f'Epoch {self.current_epoch}') as pbar:
             for batch_idx, (images, targets) in enumerate(pbar):
@@ -199,37 +201,88 @@ class ModelTrainer:
                 
                 # Forward pass with mixed precision if enabled
                 with autocast(self.config.training.device, enabled=self.config.training.mixed_precision):
-                    predictions = self.model(images)
-                    metrics_dict = self.criterion(predictions, targets)
-                    loss = metrics_dict['total_loss']  # This is now loss_w_r with class weight
+                    # Pass active_stages to model.forward when using curriculum
+                    if using_curriculum_freezing:
+                        predictions = self.model(images, active_stages=active_stages)
+                    else:
+                        predictions = self.model(images)
+                    
+                    # When using curriculum with freezing, only compute metrics for active stages
+                    if using_curriculum_freezing:
+                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
+                        metrics_dict = self.criterion(
+                            predictions, 
+                            targets, 
+                            skip_stages=frozen_stages  # Skip calculating loss for frozen stages
+                        )
+                    else:
+                        # Normal training mode - compute metrics for all stages
+                        metrics_dict = self.criterion(predictions, targets)
+                    
+                    loss = metrics_dict['total_loss']  # This includes weighted loss
                     
                 # Backward pass with gradient scaling if mixed precision is enabled
                 if self.scaler is not None:
                     self.scaler.scale(loss).backward()
+                    
+                    # If using curriculum with frozen stages, zero out gradients for frozen stages
+                    # to completely eliminate any computational overhead
+                    if using_curriculum_freezing:
+                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
+                        for stage_idx in frozen_stages:
+                            stage = self.model.stages[stage_idx]
+                            for param in stage.parameters():
+                                param.grad = None
+                                
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
                     loss.backward()
+                    
+                    # If using curriculum with frozen stages, zero out gradients for frozen stages
+                    if using_curriculum_freezing:
+                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
+                        for stage_idx in frozen_stages:
+                            stage = self.model.stages[stage_idx]
+                            for param in stage.parameters():
+                                param.grad = None
+                                
                     self.optimizer.step()
                     
                 # Update metrics
                 total_loss += loss.item()
                 all_metrics.append(metrics_dict)
                 
-                # Update running averages for display
-                for key in running_metrics.keys():
-                    if key in metrics_dict:
-                        value = metrics_dict[key]
-                        if torch.is_tensor(value):
-                            value = value.item()
-                        if np.isfinite(value) and abs(value) < 1e6:
-                            running_metrics[key] = (running_metrics[key] * batch_idx + value) / (batch_idx + 1)
-                
-                # Format running averages for display with 4 decimal places
+                # Format metrics for display in progress bar
                 display_metrics = {}
-                for key, value in running_metrics.items():
-                    if np.isfinite(value) and abs(value) < 1e6:
-                        display_metrics[key] = f"{value:.4f}"
+                
+                # Always show these core metrics
+                if 'base_loss' in metrics_dict:
+                    display_metrics['base_loss'] = f"{metrics_dict['base_loss'].item():.4f}"
+                    
+                if 'loss_w_r' in metrics_dict:
+                    display_metrics['loss_w_r'] = f"{metrics_dict['loss_w_r'].item():.4f}"
+                    
+                if 'total_loss' in metrics_dict:
+                    display_metrics['total_loss'] = f"{metrics_dict['total_loss'].item():.4f}"
+                    
+                if 'dice' in metrics_dict:
+                    display_metrics['dice'] = f"{metrics_dict['dice'].item():.3f}"
+                    
+                # Add per-stage metrics based on curriculum mode
+                if using_curriculum_freezing:
+                    # Only show metrics for active stages when using curriculum
+                    for stage_idx in active_stages:
+                        stage_key = f'stage{stage_idx+1}'
+                        if f'{stage_key}_dice' in metrics_dict:
+                            display_metrics[f'S{stage_idx+1}_dice'] = f"{metrics_dict[f'{stage_key}_dice'].item():.3f}"
+                else:
+                    # Show metrics for all stages when not using curriculum
+                    stages_count = len(self.model.stages) if hasattr(self.model, 'stages') else 1
+                    for stage_idx in range(stages_count):
+                        stage_key = f'stage{stage_idx+1}'
+                        if f'{stage_key}_dice' in metrics_dict:
+                            display_metrics[f'S{stage_idx+1}_dice'] = f"{metrics_dict[f'{stage_key}_dice'].item():.3f}"
                 
                 pbar.set_postfix(display_metrics)
                 
@@ -240,7 +293,7 @@ class ModelTrainer:
                         f"Loss: {loss.item():.4f}, Avg Loss: {total_loss / (batch_idx + 1):.4f}"
                     )
                 
-        # Calculate average metrics across all batches in this epoch
+        # Calculate average metrics
         avg_metrics = {}
         for key in ['total_loss', 'base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
             values = []
@@ -256,6 +309,31 @@ class ModelTrainer:
             
             if values:
                 avg_metrics[key] = np.mean(values)
+        
+        # Add per-stage metrics only for active stages when using curriculum
+        if hasattr(self.model, 'stages'):
+            num_stages = len(self.model.stages)
+            frozen_stages = []
+            
+            if using_curriculum_freezing:
+                _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
+                
+            for stage_idx in range(num_stages):
+                # Skip metrics for frozen stages
+                if stage_idx in frozen_stages:
+                    continue
+                    
+                stage_prefix = f"stage{stage_idx+1}"
+                for metric in ['dice', 'precision', 'recall', 'iou']:
+                    metric_key = f"{stage_prefix}_{metric}"
+                    values = []
+                    for m in all_metrics:
+                        if metric_key in m and torch.is_tensor(m[metric_key]):
+                            val = m[metric_key].item()
+                            if np.isfinite(val) and abs(val) < 1e9:
+                                values.append(val)
+                    if values:
+                        avg_metrics[metric_key] = np.mean(values)
         
         # Set total_loss to be loss_w_r for evaluation since that's what we train with
         if 'loss_w_r' in avg_metrics:
@@ -293,6 +371,18 @@ class ModelTrainer:
         
         self.logger.info("Starting validation...")
         
+        # Determine if we're using curriculum learning with stage freezing
+        using_curriculum_freezing = (
+            hasattr(self, 'curriculum_manager') and 
+            self.curriculum_manager is not None and
+            self.curriculum_manager.are_stages_frozen()
+        )
+        
+        frozen_stages = []
+        active_stages = None
+        if using_curriculum_freezing:
+            active_stages, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
+        
         # Create progress bar with detailed metrics
         val_pbar = tqdm(self.val_loader, desc='Validation')
         
@@ -304,29 +394,73 @@ class ModelTrainer:
             if targets.dim() == 3:
                 targets = targets.unsqueeze(1)
             
-            # Forward pass
+            # Forward pass - pass active_stages to model.forward when using curriculum
             with autocast(self.config.training.device, enabled=self.config.training.mixed_precision):
-                predictions = self.model(images)
-                metrics_dict = self.criterion(predictions, targets)
+                if using_curriculum_freezing:
+                    predictions = self.model(images, active_stages=active_stages)
+                else:
+                    predictions = self.model(images)
+                
+                # When using curriculum with freezing, only compute metrics for active stages
+                if using_curriculum_freezing:
+                    metrics_dict = self.criterion(
+                        predictions, 
+                        targets, 
+                        skip_stages=frozen_stages  # Skip calculating metrics for frozen stages
+                    )
+                else:
+                    # Normal validation mode - compute metrics for all stages
+                    metrics_dict = self.criterion(predictions, targets)
+                
                 loss = metrics_dict['total_loss']
             
             # Store results
             total_loss += loss.item()
             all_metrics.append(metrics_dict)
             
-            # Display metrics in validation progress bar - direct approach without helper methods
+            # Format display metrics based on curriculum mode
             display_metrics = {}
-            for key in ['base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
-                if key in metrics_dict:
-                    value = metrics_dict[key]
-                    if torch.is_tensor(value):
-                        value = value.item()
-                    if np.isfinite(value) and abs(value) < 1e6:
-                        display_metrics[key] = value
+            
+            # Always show these core metrics from the current active stage
+            if 'base_loss' in metrics_dict:
+                display_metrics['base_loss'] = f"{metrics_dict['base_loss'].item():.4f}"
+                
+            if 'loss_w_r' in metrics_dict:
+                display_metrics['loss_w_r'] = f"{metrics_dict['loss_w_r'].item():.4f}"
+                
+            if 'total_loss' in metrics_dict:
+                display_metrics['total_loss'] = f"{metrics_dict['total_loss'].item():.4f}"
+                
+            if 'dice' in metrics_dict:
+                display_metrics['dice'] = f"{metrics_dict['dice'].item():.3f}"
+            
+            if 'precision' in metrics_dict:
+                display_metrics['precision'] = f"{metrics_dict['precision'].item():.3f}"
+                
+            if 'recall' in metrics_dict:
+                display_metrics['recall'] = f"{metrics_dict['recall'].item():.3f}"
+                
+            if 'jaccard' in metrics_dict:
+                display_metrics['jaccard'] = f"{metrics_dict['jaccard'].item():.3f}"
+                
+            # Add per-stage metrics based on curriculum mode
+            if using_curriculum_freezing:
+                # Only show metrics for active stages when using curriculum
+                for stage_idx in active_stages:
+                    stage_key = f'stage{stage_idx+1}'
+                    if f'{stage_key}_dice' in metrics_dict:
+                        display_metrics[f'S{stage_idx+1}_dice'] = f"{metrics_dict[f'{stage_key}_dice'].item():.3f}"
+            else:
+                # Show metrics for all stages when not using curriculum
+                stages_count = len(self.model.stages) if hasattr(self.model, 'stages') else 1
+                for stage_idx in range(stages_count):
+                    stage_key = f'stage{stage_idx+1}'
+                    if f'{stage_key}_dice' in metrics_dict:
+                        display_metrics[f'S{stage_idx+1}_dice'] = f"{metrics_dict[f'{stage_key}_dice'].item():.3f}"
             
             val_pbar.set_postfix(display_metrics)
         
-        # Calculate average metrics - same approach as in train_epoch
+        # Calculate average metrics across all batches
         avg_metrics = {}
         for key in ['total_loss', 'base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
             values = []
@@ -342,6 +476,29 @@ class ModelTrainer:
             
             if values:
                 avg_metrics[key] = np.mean(values)
+        
+        # Add per-stage metrics
+        if hasattr(self.model, 'stages'):
+            num_stages = len(self.model.stages)
+            for stage_idx in range(num_stages):
+                # Only include metrics for active stages in curriculum mode
+                if not using_curriculum_freezing or stage_idx not in frozen_stages:
+                    stage_prefix = f"stage{stage_idx+1}"
+                    for metric in ['dice', 'precision', 'recall', 'iou']:
+                        metric_key = f"{stage_prefix}_{metric}"
+                        values = []
+                        for m in all_metrics:
+                            if metric_key in m and torch.is_tensor(m[metric_key]):
+                                val = m[metric_key].item()
+                                if np.isfinite(val) and abs(val) < 1e9:
+                                    values.append(val)
+                            elif metric_key in m and isinstance(m[metric_key], (int, float)):
+                                val = m[metric_key]
+                                if np.isfinite(val) and abs(val) < 1e9:
+                                    values.append(val)
+                        
+                        if values:
+                            avg_metrics[metric_key] = np.mean(values)
         
         # Update metrics history
         self.metrics_manager.update_history('val', avg_metrics)
@@ -426,6 +583,11 @@ class ModelTrainer:
             "metrics_history": self.metrics_manager.metrics_history
         }
         
+    def _optimize_cuda_memory(self):
+        """Clear CUDA cache and optimize memory usage."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
     def train_with_curriculum(
         self,
         stage_schedule,
@@ -453,15 +615,11 @@ class ModelTrainer:
             
             # Configure curriculum with the provided parameters
             curriculum_params = {
-                'stage_schedule': stage_schedule
+                'stage_schedule': stage_schedule,
+                'learning_rates': learning_rates,
+                'stage_freezing': stage_freezing
             }
             
-            if learning_rates is not None:
-                curriculum_params['learning_rates'] = learning_rates
-                
-            if stage_freezing is not None:
-                curriculum_params['stage_freezing'] = stage_freezing
-                
             self.curriculum_manager.configure_curriculum(curriculum_params)
         
         self.logger.info("Starting curriculum training...")
@@ -470,6 +628,9 @@ class ModelTrainer:
         
         # Train according to the curriculum stages
         for stage_idx, (model_stage_idx, stage_epochs) in enumerate(stage_schedule):
+            # Clear CUDA cache before each stage
+            self._optimize_cuda_memory()
+            
             # Update active stages based on current stage
             active_stages = self.curriculum_manager.update_active_stages(stage_idx)
             
@@ -480,6 +641,12 @@ class ModelTrainer:
             # Apply stage freezing according to curriculum
             self.curriculum_manager.apply_stage_freezing()
             
+            # Verify stage freezing status
+            for stage_i, stage in enumerate(self.model.stages):
+                requires_grad = any(p.requires_grad for p in stage.parameters())
+                status = "unfrozen" if requires_grad else "frozen"
+                self.logger.info(f"Stage {stage_i+1} is {status}")
+            
             stage_name = f"Stage {model_stage_idx+1}"
             self.logger.info(f"=== Starting {stage_name} training for {stage_epochs} epochs ===")
             self.logger.info(f"Learning rate: {lr}")
@@ -487,18 +654,19 @@ class ModelTrainer:
             # Train this stage
             stage_results = self.train(epochs=stage_epochs)
             results[f"stage_{model_stage_idx+1}"] = stage_results
+            
+            # Clear CUDA cache after stage completion
+            self._optimize_cuda_memory()
+            
+            # Log current GPU memory usage if available
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated() / 1024**2  # Convert to MB
+                memory_reserved = torch.cuda.memory_reserved() / 1024**2
+                self.logger.info(f"GPU Memory after stage {model_stage_idx+1}:")
+                self.logger.info(f"  Allocated: {memory_allocated:.1f} MB")
+                self.logger.info(f"  Reserved: {memory_reserved:.1f} MB")
         
         self.logger.info("Curriculum training completed")
-        
-        # Print metrics in CSV format for the final epoch
-        header = self.curriculum_manager.get_metrics_header()
-        self.logger.info(f"Final metrics: {header}")
-        
-        # Get metrics from the last epoch
-        if 'val_metrics' in self.metrics_manager.metrics_history and self.metrics_manager.metrics_history['val_metrics']:
-            final_metrics = self.metrics_manager.metrics_history['val_metrics'][-1]
-            metrics_csv = self.curriculum_manager.format_metrics_for_logging(final_metrics)
-            self.logger.info(f"Values: {metrics_csv}")
         
         return results
     
