@@ -3,7 +3,7 @@ Model definitions and utilities for segmentation.
 """
 
 from .cascaded_unet import FlexibleCascadedUNet
-from .trainer import ModelTrainer
+from .model_trainer import ModelTrainer
 from .model_utils import (
     create_model,
     load_checkpoint,
@@ -16,6 +16,10 @@ from .training_utils import (
     train_with_curriculum,
     evaluate_model
 )
+from .metrics_manager import MetricsManager
+from .gradient_manager import GradientManager
+from .visualization_manager import VisualizationManager
+from .curriculum_manager import CurriculumManager
 
 __all__ = [
     'FlexibleCascadedUNet',
@@ -27,5 +31,9 @@ __all__ = [
     'setup_trainer',
     'train_model',
     'train_with_curriculum',
-    'evaluate_model'
+    'evaluate_model',
+    'MetricsManager',
+    'GradientManager',
+    'VisualizationManager',
+    'CurriculumManager'
 ]

@@ -78,7 +78,7 @@ class LossConfig:
     weight_bce: float = 0.5
     weight_dice: float = 0.5
     focal_gamma: float = 2.0
-    reward_coef: float = 0.1
+    reward_coef: float = 0.5  
     stage_weights: Optional[List[float]] = None  # Weight for each stage's loss
     class_weights: Optional[Dict[str, float]] = None  # Weight for each class
     threshold_per_class: Optional[List[float]] = None  # Threshold for each class

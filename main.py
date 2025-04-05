@@ -19,6 +19,13 @@ from nii_trainer.configs.config import (
     LossConfig
 )
 from nii_trainer.utils import Experiment, setup_logger
+from nii_trainer.models import (
+    MetricsManager,
+    GradientManager,
+    VisualizationManager,
+    CurriculumManager,
+    ModelTrainer
+)
 
 def create_liver_tumor_config(
     volume_dir="volume_pt1",
@@ -32,6 +39,7 @@ def create_liver_tumor_config(
     train_val_test_split=(0.6, 0.2, 0.2),
     learning_rate=1e-4,
     epochs=100,
+    batch_accumulation=1,
     experiment_name="liver_tumor_cascade",
 ):
     """
@@ -49,6 +57,7 @@ def create_liver_tumor_config(
         train_val_test_split: Proportions for train/val/test split
         learning_rate: Initial learning rate
         epochs: Maximum number of training epochs
+        batch_accumulation: Gradient accumulation steps
         experiment_name: Name of experiment
         
     Returns:
@@ -73,8 +82,8 @@ def create_liver_tumor_config(
                 StageConfig(
                     input_classes=["background", "liver"],
                     target_class="liver",
-                    encoder_type="mobilenet_v2",
-                    num_layers=5,
+                    encoder_type="efficientnet",
+                    num_layers=3,
                     is_binary=True,
                     threshold=0.5
                 ),
@@ -97,7 +106,8 @@ def create_liver_tumor_config(
             learning_rate=learning_rate,
             epochs=epochs,
             patience=10,
-            mixed_precision=True
+            mixed_precision=True,
+            batch_accumulation=batch_accumulation
         ),
         loss=LossConfig(
             stage_weights=[1.0, 1.5],  # Higher weight for tumor stage
@@ -139,6 +149,7 @@ def run_liver_tumor_segmentation(
     skip_empty=False,
     learning_rate=1e-4,
     epochs=100,
+    batch_accumulation=1,
     custom_config=None,
     custom_curriculum_params=None,
     verbose=True
@@ -165,6 +176,7 @@ def run_liver_tumor_segmentation(
         skip_empty: Whether to skip slices without annotations
         learning_rate: Initial learning rate
         epochs: Maximum number of training epochs
+        batch_accumulation: Number of batches to accumulate gradients over
         custom_config: Optional custom TrainerConfig (overrides all other config params)
         custom_curriculum_params: Optional custom curriculum parameters
         verbose: Whether to print detailed logs
@@ -198,6 +210,7 @@ def run_liver_tumor_segmentation(
             slice_step=slice_step,
             learning_rate=learning_rate,
             epochs=epochs,
+            batch_accumulation=batch_accumulation,
             experiment_name=experiment_name
         )
     

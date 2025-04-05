@@ -12,10 +12,7 @@ from ..data import (
 )
 from ..models import (
     initialize_training_components,
-    setup_trainer,
-    train_model,
-    train_with_curriculum,
-    evaluate_model
+    ModelTrainer
 )
 from ..visualization import (
     generate_visualizations
@@ -176,18 +173,41 @@ class Experiment:
             )
         )
         
-        # Set up trainer
-        self.trainer = setup_trainer(
+        # Create scheduler if enabled in config
+        scheduler = None
+        if hasattr(self.config.training, 'use_scheduler') and self.config.training.use_scheduler:
+            self.logger.info("Creating learning rate scheduler...")
+            
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.1,
+                patience=5 if not hasattr(self.config.training, 'scheduler_patience') 
+                          else self.config.training.scheduler_patience,
+                verbose=True
+            )
+        
+        # Set up trainer using the new modular architecture
+        self.trainer = ModelTrainer(
             config=self.config,
             model=self.model,
             train_loader=self.dataloaders["train"],
             val_loader=self.dataloaders["val"] if "val" in self.dataloaders else None,
             optimizer=self.optimizer,
-            start_epoch=start_epoch,
-            best_val_loss=best_val_loss,
-            metrics_history=metrics_history,
+            scheduler=scheduler,
             logger=self.logger
         )
+        
+        # Set trainer state if resuming training
+        if start_epoch > 0:
+            self.trainer.current_epoch = start_epoch
+            self.trainer.best_val_loss = best_val_loss
+            
+            if metrics_history:
+                self.trainer.metrics_manager.metrics_history = metrics_history
+                
+            self.logger.info(f"Resuming training from epoch {start_epoch}")
+            self.logger.info(f"Best validation loss: {best_val_loss:.4f}")
         
         return self.model, self.trainer
     
@@ -205,7 +225,7 @@ class Experiment:
         
         self.logger.info("Starting model training...")
         
-        # Train the model
+        # Train the model using the new modular trainer
         if curriculum:
             if curriculum_params is None:
                 curriculum_params = {}
@@ -228,23 +248,18 @@ class Experiment:
             self.logger.info(f"Learning rates: {learning_rates}")
             self.logger.info(f"Stage freezing: {stage_freezing}")
             
-            train_with_curriculum(
-                trainer=self.trainer,
+            # Use the new curriculum training method
+            training_results = self.trainer.train_with_curriculum(
                 stage_schedule=stage_schedule,
                 learning_rates=learning_rates,
-                stage_freezing=stage_freezing,
-                checkpoint_dir=self.checkpoints_dir,
-                logger=self.logger
+                stage_freezing=stage_freezing
             )
         else:
-            train_model(
-                trainer=self.trainer,
-                config=self.config,
-                checkpoint_dir=self.checkpoints_dir,
-                logger=self.logger
-            )
+            # Use the standard training method
+            training_results = self.trainer.train()
         
         self.logger.info("Model training completed")
+        return training_results
         
     def evaluate(self):
         """
@@ -256,48 +271,61 @@ class Experiment:
         
         self.logger.info("Evaluating model...")
         
-        # Evaluate on validation set
-        val_metrics = evaluate_model(
-            trainer=self.trainer,
-            config=self.config,
-            test_loader=self.dataloaders.get("val"),
-            logger=self.logger
-        )
+        # Evaluate on validation set using the new evaluate method
+        val_metrics = self.trainer.evaluate(self.dataloaders.get("val"))
         
         # Evaluate on test set if available
         if "test" in self.dataloaders:
             self.logger.info("Evaluating on test set...")
-            test_metrics = evaluate_model(
-                trainer=self.trainer,
-                config=self.config,
-                test_loader=self.dataloaders["test"],
-                logger=self.logger
-            )
+            test_metrics = self.trainer.evaluate(self.dataloaders["test"])
+            return {"val": val_metrics, "test": test_metrics}
         
-        return val_metrics
+        return {"val": val_metrics}
     
     def visualize(self):
         """
         Generate visualizations for the experiment.
         """
-        if self.model is None:
+        if self.model is None or self.trainer is None:
             self.logger.warning("Model not set up. Run setup_model() first.")
             return
         
         self.logger.info("Generating visualizations...")
         
-        # Generate visualizations
-        generate_visualizations(
-            model=self.model,
-            dataloader=self.dataloaders["val"] if "val" in self.dataloaders else self.dataloaders["train"],
-            class_names=self.config.data.classes,
-            trainer=self.trainer,
-            device=self.config.training.device,
-            base_dir=self.visualizations_dir,
-            logger=self.logger
-        )
-        
-        self.logger.info(f"Visualizations saved to {self.visualizations_dir}")
+        # Use the visualization manager from the trainer to generate visualizations
+        if hasattr(self.trainer, 'visualization_manager'):
+            dataloader = self.dataloaders["val"] if "val" in self.dataloaders else self.dataloaders["train"]
+            
+            # Generate predictions visualizations
+            self.trainer.visualization_manager.visualize_predictions(
+                model=self.model,
+                dataloader=dataloader,
+                device=self.config.training.device,
+                num_samples=8,  # Show more samples for better evaluation
+                epoch=self.trainer.current_epoch
+            )
+            
+            # Generate metrics plots
+            self.trainer.visualization_manager.plot_metrics(
+                metrics_history=self.trainer.metrics_manager.metrics_history,
+                epoch=self.trainer.current_epoch,
+                save=True
+            )
+            
+            self.logger.info(f"Visualizations saved to {self.trainer.visualization_manager.visualizations_dir}")
+        else:
+            # Fallback to old method if needed
+            generate_visualizations(
+                model=self.model,
+                dataloader=self.dataloaders["val"] if "val" in self.dataloaders else self.dataloaders["train"],
+                class_names=self.config.data.classes,
+                trainer=self.trainer,
+                device=self.config.training.device,
+                base_dir=self.visualizations_dir,
+                logger=self.logger
+            )
+            
+            self.logger.info(f"Visualizations saved to {self.visualizations_dir}")
     
     def run(
         self,
@@ -323,35 +351,43 @@ class Experiment:
         
         self.logger.info(f"Starting experiment: {self.experiment_name}")
         
-        # Process data if requested
-        if process_data:
-            self.process_data(
-                volume_dir=volume_dir,
-                segmentation_dir=segmentation_dir,
-                force_overwrite=force_overwrite
-            )
-        
-        # Set up data pipeline
-        self.setup_data_pipeline()
-        
-        # Set up model
-        self.setup_model()
-        
-        # Train model
-        self.train(curriculum=curriculum, curriculum_params=curriculum_params)
-        
-        # Evaluate model
-        self.evaluate()
-        
-        # Generate visualizations
-        self.visualize()
-        
-        total_time = time.time() - start_time
-        self.logger.info(f"Experiment completed in {total_time/60:.2f} minutes")
-        
-        return {
-            "model": self.model,
-            "trainer": self.trainer,
-            "datasets": self.datasets,
-            "dataloaders": self.dataloaders
-        }
+        try:
+            # Process data if requested
+            if process_data:
+                self.process_data(
+                    volume_dir=volume_dir,
+                    segmentation_dir=segmentation_dir,
+                    force_overwrite=force_overwrite
+                )
+            
+            # Set up data pipeline
+            self.setup_data_pipeline()
+            
+            # Set up model
+            self.setup_model()
+            
+            # Train model
+            training_results = self.train(curriculum=curriculum, curriculum_params=curriculum_params)
+            
+            # Evaluate model
+            evaluation_results = self.evaluate()
+            
+            # Generate visualizations
+            self.visualize()
+            
+            total_time = time.time() - start_time
+            self.logger.info(f"Experiment completed in {total_time/60:.2f} minutes")
+            
+            return {
+                "model": self.model,
+                "trainer": self.trainer,
+                "datasets": self.datasets,
+                "dataloaders": self.dataloaders,
+                "training_results": training_results,
+                "evaluation_results": evaluation_results,
+                "total_time_minutes": total_time/60
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error during experiment execution: {str(e)}")
+            raise
