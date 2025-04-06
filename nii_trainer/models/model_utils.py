@@ -1,9 +1,8 @@
-from pathlib import Path
+"""Model creation and initialization utilities."""
 import logging
 import torch
-from typing import Dict, Any, Optional, Tuple, Union
-import os
-
+from typing import Optional
+from pathlib import Path
 from ..configs.config import CascadeConfig
 from ..models.cascaded_unet import FlexibleCascadedUNet
 
@@ -24,13 +23,22 @@ def create_model(
         Initialized model
     """
     if logger:
-        logger.info(f"Creating model with {len(config.stages)} stages")
-        for i, stage in enumerate(config.stages):
+        # Check if config is a TrainerConfig or a CascadeConfig
+        if hasattr(config, 'cascade'):
+            stages = config.cascade.stages
+        else:
+            stages = config.stages
+            
+        logger.info(f"Creating model with {len(stages)} stages")
+        for i, stage in enumerate(stages):
             logger.info(f"Stage {i+1}: {stage.input_classes} -> {stage.target_class}")
             logger.info(f"  Encoder type: {stage.encoder_type}")
             
-    # Create the model instance
-    model = FlexibleCascadedUNet(config)
+    # Create the model instance - Handle both TrainerConfig and CascadeConfig
+    if hasattr(config, 'cascade'):
+        model = FlexibleCascadedUNet(config.cascade)
+    else:
+        model = FlexibleCascadedUNet(config)
     
     # Use DataParallel if multiple GPUs are available
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
@@ -45,201 +53,137 @@ def create_model(
         
     return model
 
-def load_checkpoint(
-    model: torch.nn.Module,
-    checkpoint_path: str,
-    device: str = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    logger: Optional[logging.Logger] = None
-) -> Tuple[bool, Optional[Dict[str, Any]]]:
+def initialize_model_optimizer(
+    config: CascadeConfig,
+    logger: Optional[logging.Logger] = None,
+    model: Optional[torch.nn.Module] = None,
+    load_best: bool = True
+) -> tuple:
     """
-    Load model checkpoint if it exists.
-    
-    Args:
-        model: Model to load checkpoint into
-        checkpoint_path: Path to the checkpoint file
-        device: Device to load the checkpoint to
-        optimizer: Optional optimizer to load state into
-        logger: Logger for logging checkpoint information
-        
-    Returns:
-        Tuple of (success_flag, checkpoint_dict)
-    """
-    if not os.path.exists(checkpoint_path):
-        if logger:
-            logger.info(f"No checkpoint found at {checkpoint_path}")
-        return False, None
-    
-    if device is None:
-        device = next(model.parameters()).device
-    
-    if logger:
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
-        
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Check if it's a full model or just a stage
-    if 'model_state_dict' in checkpoint:
-        # Full model checkpoint
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Load optimizer state if provided
-        if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if logger:
-                logger.info("Loaded optimizer state from checkpoint")
-                
-        if logger:
-            logger.info(f"Loaded complete model checkpoint from {checkpoint_path}")
-        
-        return True, checkpoint
-    
-    elif 'state_dict' in checkpoint and 'stage_idx' in checkpoint:
-        # Stage-specific checkpoint
-        stage_idx = checkpoint['stage_idx']
-        if hasattr(model, 'stages') and stage_idx < len(model.stages):
-            # Handle DataParallel wrapped model
-            if isinstance(model, torch.nn.DataParallel):
-                model.module.stages[stage_idx].load_state_dict(checkpoint['state_dict'])
-            else:
-                model.stages[stage_idx].load_state_dict(checkpoint['state_dict'])
-                
-            if logger:
-                logger.info(f"Loaded checkpoint for stage {stage_idx+1} from {checkpoint_path}")
-            
-            return True, checkpoint
-    
-    # Unknown checkpoint format
-    if logger:
-        logger.warning(f"Unrecognized checkpoint format at {checkpoint_path}")
-        
-    return False, None
-
-def save_checkpoint(
-    model: torch.nn.Module,
-    checkpoint_path: str,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    epoch: int = 0,
-    best_val_loss: float = float('inf'),
-    metrics_history: Optional[Dict[str, Any]] = None,
-    is_best: bool = False,
-    logger: Optional[logging.Logger] = None
-) -> None:
-    """
-    Save model checkpoint.
-    
-    Args:
-        model: Model to save
-        checkpoint_path: Path to save the checkpoint
-        optimizer: Optional optimizer to save state
-        epoch: Current epoch number
-        best_val_loss: Best validation loss
-        metrics_history: Training metrics history
-        is_best: Whether this is the best model so far
-        logger: Logger for logging checkpoint information
-    """
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-    
-    # Prepare checkpoint data
-    checkpoint = {
-        'epoch': epoch,
-        'best_val_loss': best_val_loss,
-        'model_state_dict': model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-    }
-    
-    if optimizer is not None:
-        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
-        
-    if metrics_history is not None:
-        checkpoint['metrics_history'] = metrics_history
-        
-    # Save the checkpoint
-    torch.save(checkpoint, checkpoint_path)
-    
-    if logger:
-        logger.info(f"Saved checkpoint to {checkpoint_path}")
-        
-    # If this is the best model, save a copy
-    if is_best:
-        best_path = os.path.join(os.path.dirname(checkpoint_path), "best_model.pth")
-        torch.save(checkpoint, best_path)
-        
-        if logger:
-            logger.info(f"Saved best model checkpoint to {best_path}")
-
-def initialize_training_components(
-    config,
-    logger: Optional[logging.Logger] = None
-) -> Tuple[torch.nn.Module, torch.optim.Optimizer, int, float, Dict[str, Any]]:
-    """
-    Initialize model, optimizer and load checkpoints if available.
+    Initialize model and optimizer based on configuration.
+    If model is not provided, it will be created.
     
     Args:
         config: Training configuration
-        logger: Logger for logging information
+        logger: Optional logger
+        model: Optional pre-created model (will be created if None)
+        load_best: Whether to automatically load the best checkpoint if available
         
     Returns:
         Tuple of (model, optimizer, start_epoch, best_val_loss, metrics_history)
     """
-    # Create model
-    model = create_model(config.cascade, config.training.device, logger)
-    
-    # Initialize tracking variables
-    start_epoch = 0
-    best_val_loss = float('inf')
-    metrics_history = {'train_loss': [], 'val_loss': [], 'train_metrics': [], 'val_metrics': []}
-    
-    # Check for existing checkpoints
-    checkpoint_dir = Path("checkpoints")
-    checkpoint_dir.mkdir(exist_ok=True)
-    
-    # Try to load full model checkpoint first
-    full_model_loaded = False
-    full_model_path = checkpoint_dir / "best_model.pth"
-    
-    # Create optimizer
     if logger:
-        logger.info("Setting up optimizer...")
-        
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay
-    )
+        logger.info("Setting up model and optimizer...")
     
-    if full_model_path.exists():
-        if logger:
-            logger.info(f"Found full model checkpoint at {full_model_path}")
-            
-        loaded, checkpoint = load_checkpoint(
-            model, 
-            str(full_model_path), 
-            config.training.device,
-            optimizer,
-            logger
+    # Create model if not provided
+    if model is None:
+        model = create_model(
+            config=config,
+            device=config.training.device if hasattr(config.training, 'device') else "cuda" if torch.cuda.is_available() else "cpu",
+            logger=logger
         )
         
-        if loaded:
-            full_model_loaded = True
-            start_epoch = checkpoint.get('epoch', 0) + 1
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            
-            if 'metrics_history' in checkpoint:
-                metrics_history = checkpoint['metrics_history']
-                
-            if logger:
-                logger.info(f"Will resume training from epoch {start_epoch}")
-                logger.info(f"Loaded trainer state: best val loss: {best_val_loss:.4f}")
+    # Create optimizer based on config type
+    if config.training.optimizer_type.lower() == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=config.training.learning_rate,
+            weight_decay=config.training.weight_decay
+        )
+    elif config.training.optimizer_type.lower() == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.training.learning_rate,
+            weight_decay=config.training.weight_decay
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer type: {config.training.optimizer_type}")
     
-    # If full model not loaded, check for individual stage checkpoints
-    if not full_model_loaded:
-        # Check for stage checkpoints
-        for i in range(len(config.cascade.stages)):
-            stage_path = checkpoint_dir / f"stage_{i+1}_best.pth"
-            if stage_path.exists():
+    # Initialize training state variables
+    start_epoch = 0
+    best_val_loss = float('inf')
+    metrics_history = {}
+    
+    # Load checkpoint if available and requested
+    if load_best:
+        checkpoint_dir = Path(config.save_dir) / config.experiment_name / "checkpoints"
+        if checkpoint_dir.exists():
+            # Look for the best checkpoint file
+            best_checkpoint = checkpoint_dir / "model_best.pth"
+            if best_checkpoint.exists():
                 if logger:
-                    logger.info(f"Found stage {i+1} checkpoint at {stage_path}")
-                load_checkpoint(model, str(stage_path), config.training.device, logger=logger)
+                    logger.info("=" * 50)
+                    logger.info(f"Found existing checkpoint at {best_checkpoint}")
+                
+                try:
+                    # Load checkpoint to verify architecture
+                    checkpoint = torch.load(best_checkpoint, map_location='cpu')
+                    
+                    # Verify if model architecture is compatible by checking the config
+                    if 'config' in checkpoint:
+                        saved_config = checkpoint['config']
+                        architecture_match = True
+                        
+                        # Check cascade stages
+                        if hasattr(config, 'cascade') and hasattr(saved_config, 'cascade'):
+                            if len(config.cascade.stages) != len(saved_config.cascade.stages):
+                                architecture_match = False
+                                if logger:
+                                    logger.warning("Number of stages mismatch")
+                            else:
+                                # Verify each stage configuration
+                                for i, (current_stage, saved_stage) in enumerate(zip(config.cascade.stages, saved_config.cascade.stages)):
+                                    if (current_stage.encoder_type != saved_stage.encoder_type or 
+                                        current_stage.num_layers != saved_stage.num_layers or 
+                                        current_stage.target_class != saved_stage.target_class):
+                                        architecture_match = False
+                                        if logger:
+                                            logger.warning(f"Stage {i+1} architecture mismatch:")
+                                            logger.warning(f"  Current: {current_stage.encoder_type}/"
+                                                         f"{current_stage.num_layers}/{current_stage.target_class}")
+                                            logger.warning(f"  Saved: {saved_stage.encoder_type}/"
+                                                         f"{saved_stage.num_layers}/{saved_stage.target_class}")
+                                        break
+                        
+                        if not architecture_match:
+                            if logger:
+                                logger.warning("Found checkpoint but model architecture doesn't match")
+                                logger.warning("Starting with fresh model")
+                                logger.info("=" * 50)
+                            return model, optimizer, start_epoch, best_val_loss, metrics_history
+                    
+                    # Load the weights and optimizer state
+                    if logger:
+                        logger.info("Loading checkpoint state:")
+                        
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
+                    best_val_loss = checkpoint['best_val_loss']
+                    
+                    if 'metrics_history' in checkpoint:
+                        metrics_history = checkpoint['metrics_history']
+                        
+                    if logger:
+                        logger.info(f"  Resuming from epoch {checkpoint['epoch']}")
+                        logger.info(f"  Best validation loss: {best_val_loss:.4f}")
+                        if metrics_history:
+                            last_metrics = metrics_history.get('val_metrics', [])[-1] if metrics_history.get('val_metrics') else {}
+                            for key, value in last_metrics.items():
+                                if isinstance(value, (float, int)):
+                                    logger.info(f"  Last {key}: {value:.4f}")
+                        logger.info("=" * 50)
+                
+                except Exception as e:
+                    if logger:
+                        logger.error(f"Error loading checkpoint: {str(e)}")
+                        logger.warning("Initializing from scratch due to checkpoint loading error")
+                        logger.info("=" * 50)
+        elif logger:
+            logger.info("No existing checkpoints found. Initializing from scratch.")
+            logger.info("=" * 50)
+    elif logger:
+        logger.info("Checkpoint loading disabled. Initializing from scratch.")
+        logger.info("=" * 50)
     
     return model, optimizer, start_epoch, best_val_loss, metrics_history

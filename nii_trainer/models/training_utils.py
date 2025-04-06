@@ -1,13 +1,12 @@
+"""Training utility functions for model training and evaluation."""
 from pathlib import Path
 import logging
-from typing import Dict, Any, Optional, Tuple, List, Union
-import time
+from typing import Dict, Any, Optional, Union
 import torch
 from torch.utils.data import DataLoader
 
 from ..configs.config import TrainerConfig
-from ..models.trainer import ModelTrainer
-from ..models.model_utils import save_checkpoint
+from .model_trainer import ModelTrainer
 
 def setup_trainer(
     config: TrainerConfig,
@@ -15,9 +14,6 @@ def setup_trainer(
     train_loader: DataLoader,
     val_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    start_epoch: int = 0,
-    best_val_loss: float = float('inf'),
-    metrics_history: Optional[Dict[str, List]] = None,
     logger: Optional[logging.Logger] = None
 ) -> ModelTrainer:
     """
@@ -29,9 +25,6 @@ def setup_trainer(
         train_loader: Training data loader
         val_loader: Validation data loader
         optimizer: Optimizer for training
-        start_epoch: Starting epoch (for resuming training)
-        best_val_loss: Best validation loss (for resuming training)
-        metrics_history: Metrics history (for resuming training)
         logger: Logger for logging information
         
     Returns:
@@ -42,7 +35,7 @@ def setup_trainer(
     
     # Create scheduler if enabled in config
     scheduler = None
-    if hasattr(config.training, 'use_scheduler') and config.training.use_scheduler:
+    if getattr(config.training, 'scheduler_type', None) == 'plateau':
         if logger:
             logger.info("Creating learning rate scheduler...")
         
@@ -50,11 +43,11 @@ def setup_trainer(
             optimizer,
             mode='min',
             factor=0.1,
-            patience=5 if not hasattr(config.training, 'scheduler_patience') else config.training.scheduler_patience,
+            patience=config.training.reduce_lr_patience,
             verbose=True
         )
     
-    # Create trainer
+    # Create trainer instance
     trainer = ModelTrainer(
         config=config,
         model=model,
@@ -65,24 +58,11 @@ def setup_trainer(
         logger=logger
     )
     
-    # Set trainer state if resuming training
-    if start_epoch > 0:
-        trainer.current_epoch = start_epoch
-        trainer.best_val_loss = best_val_loss
-        
-        if metrics_history:
-            trainer.metrics_history = metrics_history
-            
-        if logger:
-            logger.info(f"Resuming training from epoch {start_epoch}")
-            logger.info(f"Best validation loss: {best_val_loss:.4f}")
-    
     return trainer
 
 def train_model(
     trainer: ModelTrainer,
-    config: TrainerConfig,
-    checkpoint_dir: Union[str, Path] = "checkpoints",
+    checkpoint_path: Optional[Union[str, Path]] = None,
     logger: Optional[logging.Logger] = None
 ) -> ModelTrainer:
     """
@@ -90,8 +70,7 @@ def train_model(
     
     Args:
         trainer: Configured trainer instance
-        config: Trainer configuration
-        checkpoint_dir: Directory to save checkpoints
+        checkpoint_path: Optional path to checkpoint to load
         logger: Logger for logging information
         
     Returns:
@@ -99,15 +78,12 @@ def train_model(
     """
     if logger:
         logger.info("Starting model training...")
-        logger.info(f"Training for {config.training.epochs} epochs")
-        logger.info(f"Early stopping patience: {config.training.patience}")
     
-    # Create checkpoint directory
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True)
+    # Load checkpoint if provided or available
+    trainer.load_checkpoint(checkpoint_path)
     
     # Train model
-    trainer.trainer()
+    trainer.train()
     
     if logger:
         logger.info("Training completed")
@@ -116,10 +92,8 @@ def train_model(
 
 def train_with_curriculum(
     trainer: ModelTrainer,
-    stage_schedule: List[Tuple[int, int]],
-    learning_rates: Optional[List[float]] = None,
-    stage_freezing: Optional[List[bool]] = None,
-    checkpoint_dir: Union[str, Path] = "checkpoints",
+    curriculum_params: Dict[str, Any],
+    checkpoint_path: Optional[Union[str, Path]] = None,
     logger: Optional[logging.Logger] = None
 ) -> ModelTrainer:
     """
@@ -127,52 +101,24 @@ def train_with_curriculum(
     
     Args:
         trainer: Configured trainer instance
-        stage_schedule: List of (stage_idx, num_epochs) tuples
-        learning_rates: List of learning rates for each stage
-        stage_freezing: Whether to freeze previous stages
-        checkpoint_dir: Directory to save checkpoints
+        curriculum_params: Curriculum learning parameters
+        checkpoint_path: Optional path to checkpoint to load
         logger: Logger for logging information
         
     Returns:
         Trained trainer instance
     """
     if logger:
-        logger.info("Using curriculum learning approach")
-        logger.info(f"Stage schedule: {stage_schedule}")
-        logger.info(f"Learning rates: {learning_rates}")
-        logger.info(f"Stage freezing: {stage_freezing}")
+        logger.info("Starting curriculum training...")
     
-    # Create checkpoint directory
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True)
+    # Configure curriculum learning
+    trainer.configure_curriculum(curriculum_params)
     
-    # Ensure trainer has curriculum_manager initialized
-    if not hasattr(trainer, 'curriculum_manager') or trainer.curriculum_manager is None:
-        if logger:
-            logger.info("Configuring curriculum learning")
-        
-        # Configure curriculum with provided parameters
-        curriculum_params = {
-            'stage_schedule': stage_schedule,
-            'learning_rates': learning_rates,
-            'stage_freezing': stage_freezing
-        }
-        
-        # Use the optimized train_with_curriculum method
-        trainer.train_with_curriculum(
-            stage_schedule=stage_schedule,
-            learning_rates=learning_rates,
-            stage_freezing=stage_freezing
-        )
-    else:
-        # Use existing curriculum configuration
-        if logger:
-            logger.info("Using existing curriculum configuration")
-        trainer.train_with_curriculum(
-            stage_schedule=stage_schedule,
-            learning_rates=learning_rates,
-            stage_freezing=stage_freezing
-        )
+    # Load checkpoint if provided
+    trainer.load_checkpoint(checkpoint_path)
+    
+    # Train model
+    trainer.train()
     
     if logger:
         logger.info("Curriculum training completed")
@@ -181,16 +127,14 @@ def train_with_curriculum(
 
 def evaluate_model(
     trainer: ModelTrainer,
-    config: TrainerConfig,
     test_loader: Optional[DataLoader] = None,
     logger: Optional[logging.Logger] = None
 ) -> Dict[str, float]:
     """
-    Evaluate trained model on test data.
+    Evaluate trained model.
     
     Args:
         trainer: Trained trainer instance
-        config: Trainer configuration
         test_loader: Test data loader (if None, uses validation loader)
         logger: Logger for logging information
         
@@ -205,9 +149,8 @@ def evaluate_model(
     # Set model to evaluation mode
     trainer.model.eval()
     
-    # Evaluate model
-    with torch.no_grad():
-        metrics = trainer.validate()
+    # Evaluate model using training loop
+    metrics, _ = trainer.training_loop.validate(loader)
     
     # Log metrics
     if logger:

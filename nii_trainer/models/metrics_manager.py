@@ -120,9 +120,9 @@ class MetricsManager:
         
         # Default ordered metrics if not provided
         if ordered_metrics is None:
-            ordered_metrics = ['base_loss', 'loss_w_r', 'total_loss', 'dice', 'precision', 'recall', 'jaccard']
+            ordered_metrics = ['base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']
         
-        # Add the direct metrics first
+        # Add the direct metrics first - these are for the current active stage
         for metric_name in ordered_metrics:
             if metric_name in metrics:
                 value = metrics[metric_name]
@@ -131,45 +131,15 @@ class MetricsManager:
                 
                 # Validate value
                 if np.isfinite(value) and abs(value) < 1e6:
-                    # Format differently based on metric type
-                    if 'loss' in metric_name:
-                        display_dict[metric_name] = f"{value:.4f}"
-                    else:
-                        display_dict[metric_name] = f"{value:.3f}"
+                    # Use .4f precision for all metrics in the active stage
+                    display_dict[metric_name] = f"{value:.4f}"
         
-        # Add per-stage metrics if requested
-        if show_stage_metrics:
-            # Get all stage keys from metrics
-            stage_keys = [k for k in metrics.keys() if k.startswith('stage') and '_dice' in k]
-            stage_indices = []
+        # If active_stages is provided but empty, just return the basic metrics
+        if active_stages is not None and len(active_stages) == 0:
+            return display_dict
             
-            # Extract stage indices
-            for key in stage_keys:
-                try:
-                    # Format is 'stage{idx}_metric'
-                    stage_idx = int(key.split('_')[0].replace('stage', '')) - 1
-                    if stage_idx not in stage_indices:
-                        stage_indices.append(stage_idx)
-                except (ValueError, IndexError):
-                    continue
-            
-            # If active_stages is provided, only show those stages
-            if active_stages is not None:
-                stage_indices = [idx for idx in stage_indices if idx in active_stages]
-            
-            # Sort stage indices
-            stage_indices.sort()
-            
-            # Add dice scores for each stage
-            for stage_idx in stage_indices:
-                stage_key = f"stage{stage_idx+1}_dice"
-                if stage_key in metrics:
-                    value = metrics[stage_key]
-                    if torch.is_tensor(value):
-                        value = value.item()
-                    
-                    if np.isfinite(value) and abs(value) < 1e6:
-                        display_dict[f"S{stage_idx+1}_dice"] = f"{value:.3f}"
+        # We don't need to show individual stage metrics in the progress bar
+        # since we're already showing the active stage metrics above
         
         return display_dict
         
@@ -325,3 +295,88 @@ class MetricsManager:
         """Extract metrics for the current active stage."""
         # This simplified version just uses the metrics that don't have stage prefixes
         return {}
+
+class MetricAggregator:
+    """Efficiently aggregates metrics during training with memory-optimized storage."""
+    
+    def __init__(self):
+        self.reset()
+        
+    def reset(self):
+        """Reset all aggregated values."""
+        self.running_metrics = {}
+        self.counts = {}
+        
+    def update(self, metrics: Dict[str, Any], count: int = 1):
+        """Update running metrics."""
+        for key, value in metrics.items():
+            # Skip non-numeric values
+            if not isinstance(value, (int, float, torch.Tensor)):
+                continue
+                
+            # Convert to float if tensor
+            if torch.is_tensor(value):
+                value = value.item()
+                
+            # Skip invalid values
+            if not np.isfinite(value):
+                continue
+                
+            # Initialize if needed
+            if key not in self.running_metrics:
+                self.running_metrics[key] = 0.0
+                self.counts[key] = 0
+                
+            # Update running sum and count
+            self.running_metrics[key] += value * count
+            self.counts[key] += count
+            
+    def get_averages(self) -> Dict[str, float]:
+        """Get current average values."""
+        averages = {}
+        for key in self.running_metrics:
+            if self.counts[key] > 0:
+                avg = self.running_metrics[key] / self.counts[key]
+                # Ensure the average is valid
+                if np.isfinite(avg):
+                    averages[key] = avg
+                else:
+                    averages[key] = 0.0
+        return averages
+
+    def get_stage_metrics(self) -> Dict[str, Dict[str, float]]:
+        """
+        Extract and organize stage-specific metrics into a structured dictionary.
+        
+        Returns:
+            Dictionary with stage indices as keys and metric dictionaries as values
+        """
+        stage_metrics = {}
+        
+        # Extract metrics with stage prefixes
+        for key, value in self.running_metrics.items():
+            if key.startswith('stage') and '_' in key:
+                parts = key.split('_', 1)
+                stage_id = parts[0]
+                metric_name = parts[1]
+                
+                # Get the stage number
+                try:
+                    stage_num = int(stage_id.replace('stage', ''))
+                    
+                    # Create stage entry if it doesn't exist
+                    if stage_num not in stage_metrics:
+                        stage_metrics[stage_num] = {}
+                    
+                    # Calculate average for this metric
+                    if self.counts[key] > 0:
+                        avg = value / self.counts[key]
+                        if np.isfinite(avg):
+                            stage_metrics[stage_num][metric_name] = avg
+                        else:
+                            stage_metrics[stage_num][metric_name] = 0.0
+                except ValueError:
+                    # Skip if we can't parse the stage number
+                    continue
+        
+        return stage_metrics

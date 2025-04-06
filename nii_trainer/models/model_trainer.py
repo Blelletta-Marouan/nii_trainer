@@ -1,34 +1,26 @@
+"""
+Main trainer class that coordinates all training components.
+"""
 from pathlib import Path
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp import autocast
-from torch.optim import Optimizer
 from torch.utils.data import DataLoader
-from typing import Dict, List, Optional, Tuple, Any, Union
-import json
-from tqdm import tqdm
-import numpy as np
+from typing import Dict, Optional, List, Tuple, Any
 import logging
-import os
 
 from ..configs.config import TrainerConfig
 from .metrics_manager import MetricsManager
 from .gradient_manager import GradientManager
 from .visualization_manager import VisualizationManager
 from .curriculum_manager import CurriculumManager
+from .checkpoint_manager import CheckpointManager
+from .training_loop import TrainingLoop
+from .early_stopping import EarlyStoppingHandler
 from ..losses.losses import CascadedLossWithReward
-
 
 class ModelTrainer:
     """
-    Modular model trainer with support for:
-    - Gradient accumulation
-    - Mixed precision training
-    - Learning rate scheduling
-    - Early stopping
-    - Comprehensive metric tracking and visualization
-    - Multi-stage curriculum learning
+    Coordinates training components and provides a high-level interface for model training.
     """
     
     def __init__(
@@ -37,22 +29,11 @@ class ModelTrainer:
         model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        optimizer: Optimizer,
+        optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         logger: Optional[logging.Logger] = None
     ):
-        """
-        Initialize the model trainer.
-        
-        Args:
-            config: Training configuration
-            model: PyTorch model
-            train_loader: Training data loader
-            val_loader: Validation data loader
-            optimizer: PyTorch optimizer
-            scheduler: Optional learning rate scheduler
-            logger: Optional logger for logging information
-        """
+        """Initialize trainer with all components."""
         self.config = config
         self.model = model.to(config.training.device)
         self.train_loader = train_loader
@@ -68,40 +49,66 @@ class ModelTrainer:
         self.exp_dir = Path(config.save_dir) / config.experiment_name
         self.exp_dir.mkdir(parents=True, exist_ok=True)
         
+        # Initialize state
+        self.current_epoch = 0
+        self.best_val_loss = float('inf')
+        
+        # Curriculum learning state
+        self.curriculum_enabled = hasattr(config.training, 'curriculum') and config.training.curriculum.enabled
+        self.curriculum_params = config.training.curriculum.__dict__ if self.curriculum_enabled else {}
+        self.last_stage = -1  # Track stage transitions
+        
         # Initialize component managers
         self._init_managers()
         
-        # Training state
-        self.current_epoch = 0
-        self.best_val_loss = float('inf')
-        self.patience_counter = 0
+        # Initialize gradient manager
+        self.gradient_manager = GradientManager(
+            optimizer=optimizer,
+            accumulation_steps=config.training.batch_accumulation,
+            use_mixed_precision=config.training.mixed_precision,
+            device=config.training.device,
+            logger=logger
+        )
         
         self.logger.info(f"Trainer initialized with {type(model).__name__}")
         self.logger.info(f"Using device: {config.training.device}")
         self.logger.info(f"Mixed precision training: {config.training.mixed_precision}")
-        self.logger.info(f"Gradient accumulation steps: {config.training.batch_accumulation}")
-    
+        
     def _init_managers(self):
-        """Initialize component managers."""
-        # Create metrics manager
+        """Initialize all component managers."""
+        # Early stopping handler
+        self.early_stopping = EarlyStoppingHandler(
+            patience=self.config.training.early_stopping["patience"],
+            logger=self.logger
+        )
+        
+        # Training loop manager
+        self.training_loop = TrainingLoop(
+            model=self.model,
+            criterion=self.criterion,
+            optimizer=self.optimizer,
+            device=self.config.training.device,
+            use_mixed_precision=self.config.training.mixed_precision,
+            logger=self.logger
+        )
+        
+        # Checkpoint manager
+        self.checkpoint_manager = CheckpointManager(
+            exp_dir=self.exp_dir,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            logger=self.logger,
+            config=self.config  # Pass the configuration for architecture validation
+        )
+        
+        # Metrics manager
         self.metrics_manager = MetricsManager(
             classes=self.config.data.classes,
             logger=self.logger
         )
         
-        # Create gradient manager with gradient accumulation
-        self.gradient_manager = GradientManager(
-            optimizer=self.optimizer,
-            accumulation_steps=self.config.training.batch_accumulation,
-            use_mixed_precision=self.config.training.mixed_precision,
-            device=self.config.training.device,
-            logger=self.logger
-        )
-        
-        # Get the scaler from gradient manager
-        self.scaler = self.gradient_manager.scaler
-        
-        # Create visualization manager
+        # Visualization manager
         self.visualization_manager = VisualizationManager(
             classes=self.config.data.classes,
             save_dir=self.exp_dir,
@@ -109,615 +116,434 @@ class ModelTrainer:
             logger=self.logger
         )
         
-        # Curriculum manager will be initialized when needed
+        # Curriculum manager (initialized when needed)
         self.curriculum_manager = None
-    
-    def save_checkpoint(self, is_best: bool = False) -> None:
-        """
-        Save model checkpoint.
         
-        Args:
-            is_best: Whether this is the best model so far
-        """
-        checkpoint_dir = self.exp_dir / 'checkpoints'
-        checkpoint_dir.mkdir(exist_ok=True)
-        
-        checkpoint = {
-            'epoch': self.current_epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'best_val_loss': self.best_val_loss,
-            'metrics_history': self.metrics_manager.metrics_history
-        }
-        
-        if self.scheduler is not None:
-            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-            
-        # Save latest checkpoint
-        torch.save(
-            checkpoint,
-            checkpoint_dir / 'latest_checkpoint.pth'
-        )
-        
-        # Save best model if needed
-        if is_best:
-            self.logger.info(f"New best model found at epoch {self.current_epoch}")
-            torch.save(
-                checkpoint,
-                checkpoint_dir / 'best_model.pth'
-            )
-            
-        # Save metrics history
-        with open(self.exp_dir / 'metrics_history.json', 'w') as f:
-            json.dump(self.metrics_manager.metrics_history, f, indent=4)
-    
-    def load_checkpoint(self, checkpoint_path: str) -> None:
-        """
-        Load model checkpoint.
-        
-        Args:
-            checkpoint_path: Path to the checkpoint file
-        """
-        self.logger.info(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.config.training.device)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.current_epoch = checkpoint['epoch']
-        self.best_val_loss = checkpoint['best_val_loss']
-        
-        if 'metrics_history' in checkpoint:
-            self.metrics_manager.metrics_history = checkpoint['metrics_history']
-        
-        if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        self.logger.info(f"Loaded checkpoint from epoch {self.current_epoch}")
-    
-    def train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch."""
-        self.model.train()
-        total_loss = 0
-        all_metrics = []
-        
-        # Initialize running averages dictionary
-        running_metrics = {
-            'base_loss': 0.0,
-            'loss_w_r': 0.0,
-            'dice': 0.0,
-            'precision': 0.0,
-            'recall': 0.0,
-            'jaccard': 0.0
-        }
-        
-        # Determine if we're using curriculum learning with stage freezing
-        using_curriculum_freezing = (
-            hasattr(self, 'curriculum_manager') and 
-            self.curriculum_manager is not None and
-            self.curriculum_manager.are_stages_frozen()
-        )
-        
-        # Get active stages for curriculum
-        active_stages = None
-        if using_curriculum_freezing:
-            active_stages, _ = self.curriculum_manager.get_active_and_frozen_stages()
-        
-        with tqdm(self.train_loader, desc=f'Epoch {self.current_epoch}') as pbar:
-            for batch_idx, (images, targets) in enumerate(pbar):
-                images = images.to(self.config.training.device)
-                targets = targets.to(self.config.training.device)
-                
-                self.optimizer.zero_grad()
-                
-                # Forward pass with mixed precision if enabled
-                with autocast(self.config.training.device, enabled=self.config.training.mixed_precision):
-                    if using_curriculum_freezing:
-                        predictions = self.model(images, active_stages=active_stages)
-                    else:
-                        predictions = self.model(images)
-                    
-                    if using_curriculum_freezing:
-                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
-                        metrics_dict = self.criterion(
-                            predictions, 
-                            targets, 
-                            skip_stages=frozen_stages
-                        )
-                    else:
-                        metrics_dict = self.criterion(predictions, targets)
-                    
-                    loss = metrics_dict['total_loss']
-                
-                # Backward pass with gradient scaling if enabled
-                if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
-                    
-                    if using_curriculum_freezing:
-                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
-                        for stage_idx in frozen_stages:
-                            stage = self.model.stages[stage_idx]
-                            for param in stage.parameters():
-                                param.grad = None
-                                
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    
-                    if using_curriculum_freezing:
-                        _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
-                        for stage_idx in frozen_stages:
-                            stage = self.model.stages[stage_idx]
-                            for param in stage.parameters():
-                                param.grad = None
-                                
-                    self.optimizer.step()
-                    
-                # Update metrics
-                total_loss += loss.item()
-                all_metrics.append(metrics_dict)
-                
-                # Update running averages
-                current_batch = batch_idx + 1
-                for metric_name in running_metrics:
-                    if metric_name in metrics_dict:
-                        value = metrics_dict[metric_name]
-                        if torch.is_tensor(value):
-                            value = value.item()
-                        # Update running average
-                        running_metrics[metric_name] = (running_metrics[metric_name] * batch_idx + value) / current_batch
-                
-                # Format metrics for display in progress bar with running averages
-                display_metrics = {}
-                
-                # Show core metrics as running averages
-                if 'base_loss' in metrics_dict:
-                    display_metrics['base_loss'] = f"{running_metrics['base_loss']:.4f}"
-                    
-                if 'loss_w_r' in metrics_dict:
-                    display_metrics['loss_w_r'] = f"{running_metrics['loss_w_r']:.4f}"
-                    
-                if 'dice' in metrics_dict:
-                    display_metrics['dice'] = f"{running_metrics['dice']:.3f}"
-                    
-                if 'precision' in metrics_dict:
-                    display_metrics['precision'] = f"{running_metrics['precision']:.3f}"
-                    
-                if 'recall' in metrics_dict:
-                    display_metrics['recall'] = f"{running_metrics['recall']:.3f}"
-                    
-                if 'jaccard' in metrics_dict:
-                    display_metrics['jaccard'] = f"{running_metrics['jaccard']:.3f}"
-                
-                pbar.set_postfix(display_metrics)
-                
-                # Log every 100 batches
-                if batch_idx % 100 == 0:
-                    self.logger.debug(
-                        f"Batch {batch_idx}/{len(self.train_loader)}, "
-                        f"Loss: {loss.item():.4f}, Avg Loss: {total_loss / (batch_idx + 1):.4f}"
-                    )
-
-        # Calculate final average metrics
-        avg_metrics = {}
-        for key in ['total_loss', 'base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
-            values = []
-            for m in all_metrics:
-                if key in m and torch.is_tensor(m[key]):
-                    val = m[key].item()
-                    if np.isfinite(val) and abs(val) < 1e9:
-                        values.append(val)
-                elif key in m and isinstance(m[key], (int, float)):
-                    val = m[key]
-                    if np.isfinite(val) and abs(val) < 1e9:
-                        values.append(val)
-            if values:
-                avg_metrics[key] = np.mean(values)
-
-        # Add per-stage metrics only for active stages when using curriculum
-        if hasattr(self.model, 'stages'):
-            num_stages = len(self.model.stages)
-            frozen_stages = []
-            
-            if using_curriculum_freezing:
-                _, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
-                
-            for stage_idx in range(num_stages):
-                # Skip metrics for frozen stages
-                if stage_idx in frozen_stages:
-                    continue
-                    
-                stage_prefix = f"stage{stage_idx+1}"
-                for metric in ['dice', 'precision', 'recall', 'iou']:
-                    metric_key = f"{stage_prefix}_{metric}"
-                    values = []
-                    for m in all_metrics:
-                        if metric_key in m and torch.is_tensor(m[metric_key]):
-                            val = m[metric_key].item()
-                            if np.isfinite(val) and abs(val) < 1e9:
-                                values.append(val)
-                        elif metric_key in m and isinstance(m[metric_key], (int, float)):
-                            val = m[metric_key]
-                            if np.isfinite(val) and abs(val) < 1e9:
-                                values.append(val)
-                    if values:
-                        avg_metrics[metric_key] = np.mean(values)
-
-        # Set total_loss to be loss_w_r for evaluation since that's what we train with
-        if 'loss_w_r' in avg_metrics:
-            avg_metrics['loss'] = avg_metrics['loss_w_r']
-        else:
-            avg_metrics['loss'] = avg_metrics.get('total_loss', 0.0)
-
-        # Update metrics history
-        self.metrics_manager.update_history('train', avg_metrics)
-
-        # Log epoch metrics
-        self.logger.info(
-            f"Epoch {self.current_epoch} - Training Loss: {avg_metrics['loss']:.4f}"
-        )
-        if 'base_loss' in avg_metrics:
-            self.logger.info(f"Epoch {self.current_epoch} - Training Base Loss: {avg_metrics['base_loss']:.4f}")
-            
-        for key, value in avg_metrics.items():
-            if key not in ['loss', 'base_loss', 'loss_w_r', 'total_loss']:
-                self.logger.debug(f"Training {key}: {value:.4f}")
-        
-        return avg_metrics
-    
-    @torch.no_grad()
-    def validate(self) -> Tuple[Dict[str, float], float]:
-        """
-        Validate the model.
-        
-        Returns:
-            Tuple of (metrics dictionary, validation loss)
-        """
-        self.model.eval()
-        total_loss = 0
-        all_metrics = []
-        
-        # Initialize running averages dictionary
-        running_metrics = {
-            'base_loss': 0.0,
-            'loss_w_r': 0.0,
-            'dice': 0.0,
-            'precision': 0.0,
-            'recall': 0.0,
-            'jaccard': 0.0
-        }
-        
-        self.logger.info("Starting validation...")
-        
-        # Determine if we're using curriculum learning with stage freezing
-        using_curriculum_freezing = (
-            hasattr(self, 'curriculum_manager') and 
-            self.curriculum_manager is not None and
-            self.curriculum_manager.are_stages_frozen()
-        )
-        
-        frozen_stages = []
-        active_stages = None
-        if using_curriculum_freezing:
-            active_stages, frozen_stages = self.curriculum_manager.get_active_and_frozen_stages()
-        
-        # Create progress bar with detailed metrics
-        val_pbar = tqdm(self.val_loader, desc='Validation')
-        
-        for batch_idx, (images, targets) in enumerate(val_pbar):
-            images = images.to(self.config.training.device)
-            targets = targets.to(self.config.training.device)
-            
-            # Ensure targets have channel dimension
-            if targets.dim() == 3:
-                targets = targets.unsqueeze(1)
-            
-            # Forward pass
-            with autocast(self.config.training.device, enabled=self.config.training.mixed_precision):
-                predictions = self.model(images)
-                metrics_dict = self.criterion(predictions, targets)
-                loss = metrics_dict['total_loss']
-            
-            # Store results
-            total_loss += loss.item()
-            all_metrics.append(metrics_dict)
-            
-            # Update running averages
-            current_batch = batch_idx + 1
-            for metric_name in running_metrics:
-                if metric_name in metrics_dict:
-                    value = metrics_dict[metric_name]
-                    if torch.is_tensor(value):
-                        value = value.item()
-                    # Update running average
-                    running_metrics[metric_name] = (running_metrics[metric_name] * batch_idx + value) / current_batch
-            
-            # Format display metrics based on running averages
-            display_metrics = {}
-            
-            # Show core metrics as running averages
-            if 'base_loss' in metrics_dict:
-                display_metrics['base_loss'] = f"{running_metrics['base_loss']:.4f}"
-                
-            if 'loss_w_r' in metrics_dict:
-                display_metrics['loss_w_r'] = f"{running_metrics['loss_w_r']:.4f}"
-                
-            if 'dice' in metrics_dict:
-                display_metrics['dice'] = f"{running_metrics['dice']:.3f}"
-                
-            if 'precision' in metrics_dict:
-                display_metrics['precision'] = f"{running_metrics['precision']:.3f}"
-                
-            if 'recall' in metrics_dict:
-                display_metrics['recall'] = f"{running_metrics['recall']:.3f}"
-                
-            if 'jaccard' in metrics_dict:
-                display_metrics['jaccard'] = f"{running_metrics['jaccard']:.3f}"
-            
-            val_pbar.set_postfix(display_metrics)
-        
-        # Calculate average metrics across all batches
-        avg_metrics = {}
-        for key in ['total_loss', 'base_loss', 'loss_w_r', 'dice', 'precision', 'recall', 'jaccard']:
-            values = []
-            for m in all_metrics:
-                if key in m and torch.is_tensor(m[key]):
-                    val = m[key].item()
-                    if np.isfinite(val) and abs(val) < 1e9:
-                        values.append(val)
-                elif key in m and isinstance(m[key], (int, float)):
-                    val = m[key]
-                    if np.isfinite(val) and abs(val) < 1e9:
-                        values.append(val)
-            
-            if values:
-                avg_metrics[key] = np.mean(values)
-        
-        # Add per-stage metrics
-        if hasattr(self.model, 'stages'):
-            num_stages = len(self.model.stages)
-            for stage_idx in range(num_stages):
-                # Only include metrics for active stages in curriculum mode
-                if not using_curriculum_freezing or stage_idx not in frozen_stages:
-                    stage_prefix = f"stage{stage_idx+1}"
-                    for metric in ['dice', 'precision', 'recall', 'iou']:
-                        metric_key = f"{stage_prefix}_{metric}"
-                        values = []
-                        for m in all_metrics:
-                            if metric_key in m and torch.is_tensor(m[metric_key]):
-                                val = m[metric_key].item()
-                                if np.isfinite(val) and abs(val) < 1e9:
-                                    values.append(val)
-                            elif metric_key in m and isinstance(m[metric_key], (int, float)):
-                                val = m[metric_key]
-                                if np.isfinite(val) and abs(val) < 1e9:
-                                    values.append(val)
-                        
-                        if values:
-                            avg_metrics[metric_key] = np.mean(values)
-        
-        # Update metrics history
-        self.metrics_manager.update_history('val', avg_metrics)
-        
-        return avg_metrics, avg_metrics.get('total_loss', float('inf'))
-    
-    def train(self, epochs: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Train the model for the specified number of epochs.
-        
-        Args:
-            epochs: Number of epochs to train (defaults to config value)
-            
-        Returns:
-            Dictionary of training results
-        """
-        if epochs is None:
-            epochs = self.config.training.epochs
-            
-        start_epoch = self.current_epoch
-        max_patience = self.config.training.patience
-        
-        self.logger.info(f"Starting training for {epochs} epochs")
-        self.logger.info(f"Early stopping patience: {max_patience}")
-        
-        for epoch in range(start_epoch, start_epoch + epochs):
-            self.current_epoch = epoch
-            
-            # Train one epoch
-            train_metrics = self.train_epoch()
-            
-            # Validate
-            val_metrics, val_loss = self.validate()
-            
-            # Check if this is the best model so far
-            is_best = val_loss < self.best_val_loss
-            
-            if is_best:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                self.save_checkpoint(is_best=True)
+    def train(self):
+        """Train the model."""
+        if self.logger:
+            self.logger.info("=" * 80)
+            self.logger.info("Starting model training")
+            if self.curriculum_enabled:
+                self.logger.info("Using curriculum learning with stages:")
+                for i, (stage_idx, epochs) in enumerate(self.curriculum_params["stage_schedule"]):
+                    self.logger.info(f"Stage {stage_idx + 1}: {epochs} epochs, targeting {self.model.stages[stage_idx].config.target_class}")
             else:
-                self.patience_counter += 1
-                self.save_checkpoint(is_best=False)
-            
-            # Update learning rate scheduler if provided
-            if self.scheduler is not None:
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(val_loss)
-                else:
-                    self.scheduler.step()
-            
-            # Log epoch summary with metrics in the requested order
-            self.visualization_manager.log_epoch_summary(
-                train_metrics=train_metrics,
-                val_metrics=val_metrics,
-                epoch=epoch,
-                checkpoint_saved=is_best,
-                patience_counter=self.patience_counter,
-                patience_limit=max_patience,
-                learning_rate=self.gradient_manager.get_lr()
-            )
-            
-            # Plot metrics
-            if is_best or epoch % 10 == 0:
-                self.visualization_manager.plot_metrics(
-                    self.metrics_manager.metrics_history,
-                    epoch=epoch
+                self.logger.info("Using standard training approach (no curriculum)")
+                self.logger.info(f"Training all stages simultaneously for {self.config.training.epochs} epochs")
+                for i, stage in enumerate(self.model.stages):
+                    self.logger.info(f"Stage {i + 1}: targeting {stage.config.target_class}")
+            self.logger.info("=" * 80)
+
+        # Initialize dictionary to store all metrics across epochs for averaging
+        all_epochs_metrics = {'train': {}, 'val': {}}
+        
+        try:
+            while not self.should_stop():
+                # Get current stage if using curriculum learning
+                if self.curriculum_enabled:
+                    stage_idx = self.get_current_stage()
+                    if stage_idx != self.last_stage:
+                        self.last_stage = stage_idx
+                        stage_target = self.model.stages[stage_idx].config.target_class
+                        self.logger.info("=" * 80)
+                        self.logger.info(f"Transitioning to Stage {stage_idx + 1}")
+                        self.logger.info(f"Target class: {stage_target}")
+                        self.logger.info(f"Learning rate: {self.gradient_manager.get_lr():.2e}")
+                        self.logger.info("=" * 80)
+
+                # Train for one epoch using the training loop
+                train_metrics = self.training_loop.train_epoch(
+                    self.train_loader,
+                    self.current_epoch,
+                    self.curriculum_manager if self.curriculum_enabled else None
                 )
-            
-            # Check early stopping
-            if self.patience_counter >= max_patience:
-                self.logger.info(f"Early stopping triggered after {self.patience_counter} epochs without improvement")
-                break
                 
-        self.logger.info("Training completed")
-        
-        return {
-            "best_val_loss": self.best_val_loss,
-            "epochs_completed": epoch - start_epoch + 1,
-            "early_stopped": self.patience_counter >= max_patience,
-            "metrics_history": self.metrics_manager.metrics_history
-        }
-        
-    def _optimize_cuda_memory(self):
-        """Clear CUDA cache and optimize memory usage."""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+                # Validate the epoch
+                val_metrics, val_loss = self.training_loop.validate(
+                    self.val_loader,
+                    self.curriculum_manager if self.curriculum_enabled else None
+                )
+
+                # Store metrics for each epoch for later averaging (non-curriculum mode)
+                if not self.curriculum_enabled:
+                    for metric_name, value in train_metrics.items():
+                        if metric_name not in all_epochs_metrics['train']:
+                            all_epochs_metrics['train'][metric_name] = []
+                        all_epochs_metrics['train'][metric_name].append(value)
+                    
+                    for metric_name, value in val_metrics.items():
+                        if metric_name not in all_epochs_metrics['val']:
+                            all_epochs_metrics['val'][metric_name] = []
+                        all_epochs_metrics['val'][metric_name].append(value)
+
+                # Log epoch metrics with consistent formatting
+                self.logger.info("=" * 80)
+                self.logger.info(f"Epoch {self.current_epoch + 1}/{self.max_epochs}")
+                if self.curriculum_enabled:
+                    stage_idx = self.get_current_stage()
+                    self.logger.info(f"Current Stage: {stage_idx + 1} ({self.model.stages[stage_idx].config.target_class})")
+
+                # Display core metrics with consistent 4-decimal formatting
+                self.logger.info("Training Metrics:")
+                for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                    if metric in train_metrics:
+                        self.logger.info(f"  {metric}: {train_metrics[metric]:.4f}")
+                
+                self.logger.info("Validation Metrics:")
+                for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                    if metric in val_metrics:
+                        self.logger.info(f"  {metric}: {val_metrics[metric]:.4f}")
+
+                # Per-stage metrics if available
+                if any(key.startswith('stage') for key in train_metrics):
+                    self.logger.info("Per-Stage Metrics:")
+                    for i in range(len(self.model.stages)):
+                        stage_prefix = f"stage{i+1}_"
+                        stage_metrics = {k.replace(stage_prefix, ''): v 
+                                      for k, v in train_metrics.items() 
+                                      if k.startswith(stage_prefix)}
+                        if stage_metrics:
+                            self.logger.info(f"  Stage {i+1}:")
+                            for metric, value in stage_metrics.items():
+                                self.logger.info(f"    {metric}: {value:.4f}")
+
+                self.logger.info("=" * 80)
+
+                # Update learning rate if using scheduler
+                if self.scheduler is not None:
+                    self.scheduler.step(val_loss)
+
+                # Early stopping check
+                if self.early_stopping(val_loss, self.current_epoch):
+                    self.logger.info("Early stopping triggered")
+                    break
+
+                # Update best model if needed
+                current_val_loss = val_loss
+                if current_val_loss < self.best_val_loss:
+                    self.best_val_loss = current_val_loss
+                    self.checkpoint_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        epoch=self.current_epoch,
+                        best_val_loss=self.best_val_loss,
+                        metrics_history=self.metrics_manager.metrics_history,
+                        is_best=True
+                    )
+                    self.logger.info(f"New best model saved! (val_loss: {current_val_loss:.4f})")
+
+                self.current_epoch += 1
+
+                # Update metrics history
+                self.metrics_manager.update_history('train', train_metrics)
+                self.metrics_manager.update_history('val', val_metrics)
+
+        except KeyboardInterrupt:
+            self.logger.info("Training interrupted by user")
+            
+        except Exception as e:
+            self.logger.error(f"Error during training: {str(e)}")
+            raise
+
+        # After training completes, display average metrics if not using curriculum
+        if not self.curriculum_enabled and self.current_epoch > 0:
+            self.logger.info("=" * 80)
+            self.logger.info("TRAINING SUMMARY")
+            self.logger.info("=" * 80)
+            self.logger.info(f"Total epochs completed: {self.current_epoch}")
+            
+            # Calculate and display average metrics across all epochs
+            self.logger.info("Average Training Metrics:")
+            for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                if metric in all_epochs_metrics['train'] and all_epochs_metrics['train'][metric]:
+                    avg_value = sum(all_epochs_metrics['train'][metric]) / len(all_epochs_metrics['train'][metric])
+                    self.logger.info(f"  {metric}: {avg_value:.4f}")
+            
+            self.logger.info("Average Validation Metrics:")
+            for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                if metric in all_epochs_metrics['val'] and all_epochs_metrics['val'][metric]:
+                    avg_value = sum(all_epochs_metrics['val'][metric]) / len(all_epochs_metrics['val'][metric])
+                    self.logger.info(f"  {metric}: {avg_value:.4f}")
+                    
+            # Calculate and display per-stage average metrics 
+            stage_prefixes = [f"stage{i+1}_" for i in range(len(self.model.stages))]
+            
+            # Check if we have per-stage metrics
+            has_stage_metrics = False
+            for prefix in stage_prefixes:
+                for phase in ['train', 'val']:
+                    if any(k.startswith(prefix) for k in all_epochs_metrics[phase]):
+                        has_stage_metrics = True
+                        break
+                if has_stage_metrics:
+                    break
+                    
+            if has_stage_metrics:
+                self.logger.info("Average Per-Stage Metrics:")
+                
+                for i, prefix in enumerate(stage_prefixes):
+                    # Only process stages that have data
+                    stage_has_data = False
+                    for phase in ['train', 'val']:
+                        if any(k.startswith(prefix) for k in all_epochs_metrics[phase]):
+                            stage_has_data = True
+                            break
+                            
+                    if not stage_has_data:
+                        continue
+                
+                    self.logger.info(f"  Stage {i+1} ({self.model.stages[i].config.target_class}):")
+                    
+                    # Training metrics for this stage
+                    self.logger.info("    Training:")
+                    for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                        metric_key = f"{prefix}{metric}"
+                        if metric_key in all_epochs_metrics['train'] and all_epochs_metrics['train'][metric_key]:
+                            avg_value = sum(all_epochs_metrics['train'][metric_key]) / len(all_epochs_metrics['train'][metric_key])
+                            self.logger.info(f"      {metric}: {avg_value:.4f}")
+                    
+                    # Validation metrics for this stage
+                    self.logger.info("    Validation:")
+                    for metric in ['loss', 'dice', 'precision', 'recall', 'iou']:
+                        metric_key = f"{prefix}{metric}"
+                        if metric_key in all_epochs_metrics['val'] and all_epochs_metrics['val'][metric_key]:
+                            avg_value = sum(all_epochs_metrics['val'][metric_key]) / len(all_epochs_metrics['val'][metric_key])
+                            self.logger.info(f"      {metric}: {avg_value:.4f}")
+                            
+            self.logger.info("=" * 80)
+            self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
+            self.logger.info("=" * 80)
+
+        return self.metrics_manager.metrics_history
         
     def train_with_curriculum(
-        self,
-        stage_schedule,
-        learning_rates=None,
-        stage_freezing=None
-    ):
+        self, 
+        stage_schedule: List[Tuple[int, int]], 
+        learning_rates: Optional[List[float]] = None,
+        stage_freezing: Optional[List[bool]] = None
+    ) -> Dict[str, Any]:
         """
-        Train the model using curriculum learning.
+        Train the model using curriculum learning approach.
         
         Args:
-            stage_schedule: List of (stage_idx, num_epochs) tuples
+            stage_schedule: List of (stage_idx, num_epochs) tuples defining the training schedule
             learning_rates: Optional list of learning rates for each stage
-            stage_freezing: Optional list of booleans for freezing previous stages
+            stage_freezing: Optional list of booleans indicating whether to freeze previous stages
             
         Returns:
             Dictionary of training results
         """
-        # Initialize curriculum manager if not already done
         if self.curriculum_manager is None:
+            self.logger.warning("Curriculum manager not initialized. Creating one now.")
+            from .curriculum_manager import CurriculumManager
             self.curriculum_manager = CurriculumManager(
                 config=self.config.training,
                 model=self.model,
                 logger=self.logger
             )
             
-            # Configure curriculum with the provided parameters
-            curriculum_params = {
-                'stage_schedule': stage_schedule,
-                'learning_rates': learning_rates,
-                'stage_freezing': stage_freezing
-            }
+        # Configure curriculum with provided parameters
+        curriculum_params = {
+            'stage_schedule': stage_schedule
+        }
+        if learning_rates:
+            curriculum_params['learning_rates'] = learning_rates
+        if stage_freezing:
+            curriculum_params['stage_freezing'] = stage_freezing
             
-            self.curriculum_manager.configure_curriculum(curriculum_params)
+        self.curriculum_manager.configure_curriculum(curriculum_params)
         
-        self.logger.info("Starting curriculum training...")
+        # Train through each curriculum stage
+        self.logger.info(f"Starting curriculum training with {len(stage_schedule)} stages")
         
         results = {}
+        total_epochs = sum(epochs for _, epochs in stage_schedule)
+        epoch_offset = 0
         
-        # Train according to the curriculum stages
-        for stage_idx, (model_stage_idx, stage_epochs) in enumerate(stage_schedule):
-            # Clear CUDA cache before each stage
-            self._optimize_cuda_memory()
+        for curriculum_stage, (stage_idx, num_epochs) in enumerate(stage_schedule):
+            self.logger.info(f"Curriculum stage {curriculum_stage+1}/{len(stage_schedule)}: "
+                            f"Training stage {stage_idx+1} for {num_epochs} epochs")
             
-            # Update active stages based on current stage
-            active_stages = self.curriculum_manager.update_active_stages(stage_idx)
+            # Update active stages for this curriculum stage
+            self.curriculum_manager.update_active_stages(curriculum_stage)
             
-            # Get learning rate for this stage
-            lr = self.curriculum_manager.get_learning_rate()
-            self.gradient_manager.set_lr(lr)
-            
-            # Apply stage freezing according to curriculum
+            # Always apply stage freezing in curriculum learning for GPU efficiency
+            # This ensures only the current stage is active and unfrozen
             self.curriculum_manager.apply_stage_freezing()
             
-            # Verify stage freezing status
-            for stage_i, stage in enumerate(self.model.stages):
-                requires_grad = any(p.requires_grad for p in stage.parameters())
-                status = "unfrozen" if requires_grad else "frozen"
-                self.logger.info(f"Stage {stage_i+1} is {status}")
+            # Get current learning rate for this stage
+            if learning_rates and curriculum_stage < len(learning_rates):
+                lr = learning_rates[curriculum_stage]
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
+                self.logger.info(f"Setting learning rate to {lr}")
             
-            stage_name = f"Stage {model_stage_idx+1}"
-            self.logger.info(f"=== Starting {stage_name} training for {stage_epochs} epochs ===")
-            self.logger.info(f"Learning rate: {lr}")
+            # Log model parameter status for better transparency
+            self._log_model_parameter_status()
+                
+            # Train for this curriculum stage
+            stage_results = {}
             
-            # Train this stage
-            stage_results = self.train(epochs=stage_epochs)
-            results[f"stage_{model_stage_idx+1}"] = stage_results
+            for epoch in range(num_epochs):
+                self.current_epoch = epoch_offset + epoch
+                
+                # Training phase
+                train_metrics = self.training_loop.train_epoch(
+                    self.train_loader, 
+                    self.current_epoch,
+                    self.curriculum_manager
+                )
+                
+                # Validation phase
+                val_metrics, val_loss = self.training_loop.validate(
+                    self.val_loader,
+                    self.curriculum_manager
+                )
+                
+                # Update learning rate if using scheduler
+                if self.scheduler is not None:
+                    self.scheduler.step(val_loss)
+                
+                # Check for early stopping and best model
+                should_stop = self.early_stopping(val_loss, self.current_epoch)
+                is_best = self.early_stopping.should_save_checkpoint
+                
+                if is_best:
+                    self.best_val_loss = val_loss
+                    
+                # Update metrics history
+                self.metrics_manager.update_history('train', train_metrics)
+                self.metrics_manager.update_history('val', val_metrics)
+                
+                # Save checkpoint
+                self.checkpoint_manager.save(
+                    current_epoch=self.current_epoch,
+                    metrics_history=self.metrics_manager.metrics_history,
+                    best_val_loss=self.best_val_loss,
+                    is_best=is_best,
+                    curriculum_stage=curriculum_stage
+                )
+                
+                # Log epoch summary
+                self.visualization_manager.log_epoch_summary(
+                    train_metrics=train_metrics,
+                    val_metrics=val_metrics,
+                    epoch=self.current_epoch,
+                    checkpoint_saved=is_best,
+                    patience_counter=self.early_stopping.counter,
+                    patience_limit=self.config.training.early_stopping["patience"],
+                    learning_rate=self.optimizer.param_groups[0]['lr'],
+                    curriculum_stage=curriculum_stage,
+                    stage_idx=stage_idx
+                )
+                
+                # Check if training should stop
+                if should_stop:
+                    self.logger.info(f"Early stopping triggered at epoch {self.current_epoch}")
+                    break
+                    
+                # Store results for this epoch
+                stage_results[f"epoch_{epoch}"] = {
+                    "train": train_metrics,
+                    "val": val_metrics
+                }
             
-            # Clear CUDA cache after stage completion
-            self._optimize_cuda_memory()
+            # Update epoch offset for next stage
+            epoch_offset += num_epochs
             
-            # Log current GPU memory usage if available
-            if torch.cuda.is_available():
-                memory_allocated = torch.cuda.memory_allocated() / 1024**2  # Convert to MB
-                memory_reserved = torch.cuda.memory_reserved() / 1024**2
-                self.logger.info(f"GPU Memory after stage {model_stage_idx+1}:")
-                self.logger.info(f"  Allocated: {memory_allocated:.1f} MB")
-                self.logger.info(f"  Reserved: {memory_reserved:.1f} MB")
-        
+            # Reset early stopping counter between stages
+            self.early_stopping.reset()
+            
+            # Store results for this curriculum stage
+            results[f"curriculum_stage_{curriculum_stage}"] = {
+                "stage_idx": stage_idx,
+                "epochs": stage_results
+            }
+            
+            self.logger.info(f"Completed curriculum stage {curriculum_stage+1} (model stage {stage_idx+1})")
+            
         self.logger.info("Curriculum training completed")
+        self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
         
         return results
-    
-    @torch.no_grad()
-    def evaluate(self, dataloader=None):
-        """
-        Evaluate the model on a dataset.
         
-        Args:
-            dataloader: Optional dataloader to evaluate on (defaults to validation dataloader)
+    def _log_model_parameter_status(self):
+        """Log the trainable/frozen status of model parameters for better transparency."""
+        if not hasattr(self.model, 'stages'):
+            self.logger.info("Model doesn't have multiple stages, skipping parameter status logging")
+            return
             
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        if dataloader is None:
-            dataloader = self.val_loader
+        # Count trainable parameters per stage
+        total_params = 0
+        trainable_params = 0
+        stage_params = []
+        stage_trainable = []
+        
+        for stage_idx, stage in enumerate(self.model.stages):
+            stage_total = sum(p.numel() for p in stage.parameters())
+            stage_train = sum(p.numel() for p in stage.parameters() if p.requires_grad)
             
-        self.model.eval()
-        all_metrics = []
+            stage_params.append(stage_total)
+            stage_trainable.append(stage_train)
+            
+            total_params += stage_total
+            trainable_params += stage_train
+            
+            status = "TRAINABLE" if stage_train == stage_total else "FROZEN"
+            pct = (stage_train / stage_total * 100) if stage_total > 0 else 0
+            
+            self.logger.info(f"Stage {stage_idx+1}: {status} - {stage_train:,}/{stage_total:,} parameters ({pct:.1f}%)")
         
-        self.logger.info("Evaluating model...")
+        frozen_pct = 100 - (trainable_params / total_params * 100) if total_params > 0 else 0
+        self.logger.info(f"Total trainable parameters: {trainable_params:,}/{total_params:,} ({100-frozen_pct:.1f}%)")
+        self.logger.info(f"Total frozen parameters: {total_params-trainable_params:,}/{total_params:,} ({frozen_pct:.1f}%)")
         
-        # Use tqdm for progress tracking
-        with tqdm(dataloader, desc="Evaluation") as pbar:
-            for images, targets in pbar:
-                images = images.to(self.config.training.device)
-                targets = targets.to(self.config.training.device)
+    def load_checkpoint(self, checkpoint_path: Optional[str] = None) -> None:
+        """Load a checkpoint and restore training state."""
+        checkpoint = self.checkpoint_manager.init_from_checkpoint(checkpoint_path)
+        
+        if checkpoint:
+            self.current_epoch = checkpoint['epoch']
+            self.best_val_loss = checkpoint['best_val_loss']
+            if 'metrics_history' in checkpoint:
+                self.metrics_manager.metrics_history = checkpoint['metrics_history']
                 
-                # Forward pass
-                with autocast(self.config.training.device, enabled=self.config.training.mixed_precision):
-                    predictions = self.model(images)
-                    metrics_dict = self.criterion(predictions, targets)
-                
-                # Store metrics
-                all_metrics.append(metrics_dict)
-                
-                # Update progress bar
-                metrics_display = self.metrics_manager.format_metrics_display(
-                    metrics_dict,
-                    ordered_metrics=['base_loss', 'total_loss', 'dice', 'precision', 'recall', 'iou']
+    def configure_curriculum(self, params: Dict[str, Any]) -> None:
+        """Configure curriculum learning if needed."""
+        if params:
+            if self.curriculum_manager is None:
+                self.curriculum_manager = CurriculumManager(
+                    config=self.config.training,
+                    model=self.model,
+                    logger=self.logger
                 )
-                pbar.set_postfix(metrics_display)
-        
-        # Calculate average metrics
-        ordered_metrics = ['base_loss', 'total_loss', 'dice', 'precision', 'recall', 'iou']
-        avg_metrics = self.metrics_manager.get_epoch_averages(
-            all_metrics, 
-            len(dataloader),
-            prioritize_metrics=ordered_metrics
-        )
-        
-        # Log evaluation results
-        self.logger.info("Evaluation results:")
-        for metric_name in ordered_metrics:
-            if metric_name in avg_metrics:
-                self.logger.info(f"  {metric_name}: {avg_metrics[metric_name]:.4f}")
-        
-        return avg_metrics
+            self.curriculum_manager.configure_curriculum(params)
+            
+    def get_current_stage(self) -> int:
+        """Get the current active stage in curriculum learning."""
+        if not self.curriculum_enabled:
+            return 0
+            
+        total_epochs = 0
+        for stage_idx, num_epochs in self.curriculum_params["stage_schedule"]:
+            total_epochs += num_epochs
+            if self.current_epoch < total_epochs:
+                return stage_idx
+        return len(self.model.stages) - 1  # Return last stage if beyond schedule
+    
+    def should_stop(self) -> bool:
+        """Check if training should stop."""
+        if self.curriculum_enabled:
+            # Get total epochs from curriculum schedule
+            total_epochs = sum(epochs for _, epochs in self.curriculum_params["stage_schedule"])
+            return self.current_epoch >= total_epochs
+        else:
+            return self.current_epoch >= self.config.training.epochs
+
+    @property
+    def max_epochs(self) -> int:
+        """Get the total number of epochs for training."""
+        if self.curriculum_enabled:
+            return sum(epochs for _, epochs in self.curriculum_params["stage_schedule"])
+        return self.config.training.epochs

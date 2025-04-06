@@ -1,39 +1,49 @@
-"""
-Model definitions and utilities for segmentation.
-"""
+"""Model architectures and training components."""
 
+# Core model architectures
 from .cascaded_unet import FlexibleCascadedUNet
+from .base import EncoderFactory, EncoderBase, MobileNetV2Encoder, ResNetEncoder, EfficientNetEncoder
+
+# Training components
 from .model_trainer import ModelTrainer
-from .model_utils import (
-    create_model,
-    load_checkpoint,
-    save_checkpoint,
-    initialize_training_components
-)
-from .training_utils import (
-    setup_trainer,
-    train_model,
-    train_with_curriculum,
-    evaluate_model
-)
-from .metrics_manager import MetricsManager
-from .gradient_manager import GradientManager
+from .training_loop import TrainingLoop
+from .early_stopping import EarlyStoppingHandler
+from .checkpoint_manager import CheckpointManager
+
+# Management components
+from .metrics_manager import MetricsManager, MetricAggregator
 from .visualization_manager import VisualizationManager
 from .curriculum_manager import CurriculumManager
+from .gradient_manager import GradientManager
+
+# Utilities
+from .model_utils import create_model, initialize_model_optimizer
+from .training_utils import setup_trainer
 
 __all__ = [
+    # Model architectures
     'FlexibleCascadedUNet',
+    'EncoderFactory',
+    'EncoderBase',
+    'MobileNetV2Encoder',
+    'ResNetEncoder',
+    'EfficientNetEncoder',
+    
+    # Training components
     'ModelTrainer',
-    'create_model',
-    'load_checkpoint',
-    'save_checkpoint',
-    'initialize_training_components',
-    'setup_trainer',
-    'train_model',
-    'train_with_curriculum',
-    'evaluate_model',
+    'TrainingLoop',
+    'EarlyStoppingHandler',
+    'CheckpointManager',
+    
+    # Management components
     'MetricsManager',
-    'GradientManager',
+    'MetricAggregator',
     'VisualizationManager',
-    'CurriculumManager'
+    'CurriculumManager',
+    'GradientManager',
+    
+    # Utilities
+    'create_model',
+    'initialize_model_optimizer',
+    'setup_trainer'
 ]

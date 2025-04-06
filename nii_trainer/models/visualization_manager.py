@@ -240,7 +240,9 @@ class VisualizationManager:
         checkpoint_saved: bool = False,
         patience_counter: int = 0,
         patience_limit: int = 10,
-        learning_rate: float = 0.001
+        learning_rate: float = 0.001,
+        curriculum_stage: Optional[str] = None,
+        stage_idx: Optional[int] = None
     ):
         """
         Log a formatted summary of epoch metrics.
@@ -253,6 +255,8 @@ class VisualizationManager:
             patience_counter: Current patience counter for early stopping
             patience_limit: Patience limit for early stopping
             learning_rate: Current learning rate
+            curriculum_stage: Current curriculum stage (if curriculum learning is enabled)
+            stage_idx: Current stage index (if curriculum learning is enabled)
         """
         # Create ASCII table characters for better compatibility
         border_char = "="

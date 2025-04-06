@@ -5,22 +5,14 @@ import time
 import torch
 import os
 
-from nii_trainer.models.curriculum_manager import CurriculumManager
-
 from ..configs.config import TrainerConfig
 from ..data import (
     process_volume_and_segmentation,
     setup_data_pipeline
 )
-from ..models import (
-    initialize_training_components,
-    ModelTrainer
-)
-from ..visualization import (
-    generate_visualizations
-)
 from ..utils.logging_utils import setup_logger
 
+# Avoid circular imports by using late/deferred imports when needed
 class Experiment:
     """
     High-level class to manage complete training experiments.
@@ -161,17 +153,24 @@ class Experiment:
         
         return self.datasets, self.dataloaders
     
-    def setup_model(self):
+    def setup_model(self, load_best: bool = True):
         """
         Set up model, optimizer, and trainer for the experiment.
+        
+        Args:
+            load_best: Whether to automatically load the best checkpoint if available
         """
         self.logger.info("Setting up model and training components...")
         
+        # Use late import to avoid circular dependency
+        from ..models.model_trainer import ModelTrainer
+        from ..models.model_utils import initialize_model_optimizer         
         # Initialize model, optimizer, and load checkpoints
         self.model, self.optimizer, start_epoch, best_val_loss, metrics_history = (
-            initialize_training_components(
+            initialize_model_optimizer(
                 config=self.config,
-                logger=self.logger
+                logger=self.logger,
+                load_best=load_best  # Pass the load_best parameter
             )
         )
         
@@ -189,7 +188,7 @@ class Experiment:
                 verbose=True
             )
         
-        # Set up trainer using the new modular architecture
+        # Set up trainer using the modular architecture
         self.trainer = ModelTrainer(
             config=self.config,
             model=self.model,
@@ -244,15 +243,18 @@ class Experiment:
                 self.config.training.learning_rate / 2
             ])
             
-            stage_freezing = curriculum_params.get('stage_freezing', [False, True])
+            # Always set stage_freezing to True for better GPU efficiency
+            # This ensures only the current stage is active and unfrozen
+            stage_freezing = curriculum_params.get('stage_freezing', [True] * len(stage_schedule))
             
-            self.logger.info("Using curriculum learning approach")
+            self.logger.info("Using curriculum learning approach with GPU optimization")
             self.logger.info(f"Stage schedule: {stage_schedule}")
             self.logger.info(f"Learning rates: {learning_rates}")
             self.logger.info(f"Stage freezing: {stage_freezing}")
             
             # Initialize curriculum manager if needed
             if not hasattr(self.trainer, 'curriculum_manager') or self.trainer.curriculum_manager is None:
+                from ..models.curriculum_manager import CurriculumManager
                 self.trainer.curriculum_manager = CurriculumManager(
                     config=self.trainer.config.training,
                     model=self.trainer.model,
@@ -334,6 +336,7 @@ class Experiment:
             self.logger.info(f"Visualizations saved to {self.trainer.visualization_manager.visualizations_dir}")
         else:
             # Fallback to old method if needed
+            from ..visualization.visualizer import generate_visualizations
             generate_visualizations(
                 model=self.model,
                 dataloader=self.dataloaders["val"] if "val" in self.dataloaders else self.dataloaders["train"],
@@ -353,7 +356,8 @@ class Experiment:
         process_data: bool = True,
         curriculum: bool = False,
         curriculum_params: Optional[Dict[str, Any]] = None,
-        force_overwrite: bool = False
+        force_overwrite: bool = False,
+        load_best: bool = True
     ):
         """
         Run complete experiment pipeline.
@@ -365,6 +369,7 @@ class Experiment:
             curriculum: Whether to use curriculum learning
             curriculum_params: Parameters for curriculum learning
             force_overwrite: Whether to overwrite existing data
+            load_best: Whether to automatically load the best checkpoint if available
         """
         start_time = time.time()
         
@@ -382,11 +387,31 @@ class Experiment:
             # Set up data pipeline
             self.setup_data_pipeline()
             
-            # Set up model
-            self.setup_model()
+            # Set up model (with checkpoint loading control)
+            self.setup_model(load_best=load_best)
             
-            # Train model
-            training_results = self.train(curriculum=curriculum, curriculum_params=curriculum_params)
+            # If curriculum is True but no params provided, use the config's curriculum settings
+            if curriculum and not curriculum_params and self.config.training.curriculum.enabled:
+                curriculum_params = {
+                    'stage_schedule': self.config.training.curriculum.stage_schedule,
+                    'learning_rates': self.config.training.curriculum.learning_rates,
+                    'stage_freezing': self.config.training.curriculum.stage_freezing,
+                    'stage_overlap': self.config.training.curriculum.stage_overlap
+                }
+                
+                # Log the curriculum parameters from config
+                self.logger.info("Using curriculum parameters from config:")
+                self.logger.info(f"  Stage Schedule: {curriculum_params['stage_schedule']}")
+                self.logger.info(f"  Learning Rates: {curriculum_params['learning_rates']}")
+                self.logger.info(f"  Stage Freezing: {curriculum_params['stage_freezing']}")
+                if 'stage_overlap' in curriculum_params:
+                    self.logger.info(f"  Stage Overlap: {curriculum_params['stage_overlap']}")
+            
+            # Train model with the appropriate curriculum settings
+            training_results = self.train(
+                curriculum=curriculum, 
+                curriculum_params=curriculum_params
+            )
             
             # Evaluate model
             evaluation_results = self.evaluate()

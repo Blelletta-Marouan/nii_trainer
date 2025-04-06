@@ -1,15 +1,21 @@
-"""
-Utility functions for the NII Trainer package.
-"""
+"""Utility functions and experiment management."""
 
-from .logging_utils import setup_logger, log_config
-from .metrics import calculate_class_metrics, calculate_volumetric_metrics
 from .experiment import Experiment
+from .logging_utils import setup_logger, log_config
+from .metrics import (
+    calculate_class_metrics,
+    calculate_volumetric_metrics
+)
 
 __all__ = [
-    'setup_logger', 
-    'log_config', 
+    # Experiment management
+    'Experiment',
+    
+    # Logging utilities
+    'setup_logger',
+    'log_config',
+    
+    # Metrics utilities
     'calculate_class_metrics',
-    'calculate_volumetric_metrics',
-    'Experiment'
+    'calculate_volumetric_metrics'
 ]

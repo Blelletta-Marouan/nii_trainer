@@ -1,6 +1,75 @@
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple, Any
+"""Configuration classes for the training pipeline."""
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Tuple, Any, Union
+from pathlib import Path
 import torch
+
+@dataclass
+class CheckpointConfig:
+    """Configuration for checkpoint management."""
+    save_dir: Path
+    max_checkpoints: int = 5
+    save_frequency: int = 1  # Save every N epochs
+    save_best: bool = True
+    save_last: bool = True
+    save_optimizer: bool = True
+    save_scheduler: bool = True
+
+@dataclass
+class VisualizationConfig:
+    """Configuration for visualization management."""
+    save_plots: bool = True
+    save_predictions: bool = True
+    plot_frequency: int = 1  # Plot every N epochs
+    num_samples: int = 4  # Number of samples to visualize
+    dpi: int = 100
+    plot_size: Tuple[int, int] = (15, 10)
+    
+    # Visualization options
+    show_class_colormap: bool = True
+    overlay_alpha: float = 0.5
+    show_metrics: bool = True
+    show_confidence: bool = True
+    
+    # Logging options
+    log_images: bool = True
+    log_metrics: bool = True
+    log_confusion_matrix: bool = True
+    
+    # Export options
+    export_format: str = "png"  # png, jpg, pdf
+    save_raw_predictions: bool = False  # Save raw prediction arrays
+    
+    # Layout options
+    subplots_layout: Tuple[int, int] = (2, 2)  # rows, cols
+    figure_title_fontsize: int = 16
+    axis_label_fontsize: int = 12
+
+@dataclass
+class CurriculumConfig:
+    """Configuration for curriculum learning."""
+    enabled: bool = False
+    stage_schedule: List[Tuple[int, int]] = field(default_factory=list)  # [(stage_idx, num_epochs),...]
+    learning_rates: List[float] = field(default_factory=list)  # Per-stage learning rates
+    stage_freezing: List[bool] = field(default_factory=list)  # Whether to freeze previous stages
+    stage_metrics: List[str] = field(default_factory=lambda: ['loss', 'dice'])  # Metrics to track per stage
+    use_gradual_unfreezing: bool = False  # Whether to gradually unfreeze stages
+    stage_overlap: int = 0  # Number of epochs to overlap between stages
+    warm_up_epochs: int = 0  # Number of warm-up epochs per stage
+    final_joint_training: bool = False  # Whether to do joint training of all stages at the end
+    curriculum_metrics: Dict[str, float] = field(default_factory=lambda: {
+        'loss_threshold': 0.3,  # Loss threshold to advance to next stage
+        'dice_threshold': 0.8,  # Dice score threshold to advance
+        'stability_epochs': 3  # Number of epochs metrics must be stable
+    })
+
+@dataclass
+class MetricsConfig:
+    """Configuration for metrics tracking."""
+    metrics: List[str] = field(default_factory=lambda: ['loss', 'dice', 'iou', 'precision', 'recall'])
+    track_per_class: bool = True
+    log_to_file: bool = True
+    log_frequency: int = 100  # Log every N batches
 
 @dataclass
 class ModelConfig:
@@ -45,32 +114,118 @@ class DataConfig:
     slice_step: int = 1
     skip_empty: bool = True
     balance_dataset: bool = True
-    window_params: Dict[str, Any] = None  # CT window parameters per class if needed
-    augmentation_params: Dict[str, Any] = None
+    
+    # Advanced preprocessing options
+    normalization: Dict[str, Any] = field(default_factory=lambda: {
+        "method": "min_max",  # Options: min_max, z_score, percentile
+        "params": {
+            "min_val": -1000,
+            "max_val": 1000,
+            "percentile_range": (1, 99)
+        }
+    })
+    
+    # Window parameters per modality/class
+    window_params: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        "default": {"width": 180, "level": 50},
+        "liver": {"width": 150, "level": 30},
+        "tumor": {"width": 200, "level": 70}
+    })
+    
+    # Comprehensive augmentation settings
+    augmentation_params: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "spatial": {
+            "rotation_range": (-10, 10),
+            "scale_range": (0.9, 1.1),
+            "flip_probability": 0.5,
+            "elastic_deformation": {"sigma": 10, "points": 3}
+        },
+        "intensity": {
+            "brightness_range": (-0.2, 0.2),
+            "contrast_range": (0.8, 1.2),
+            "gamma_range": (0.8, 1.2),
+            "noise": {
+                "gaussian": {"mean": 0, "std": 0.02},
+                "poisson_noise_lambda": 1.0
+            }
+        },
+        "mixing": {
+            "mixup_alpha": 0.2,
+            "cutmix_prob": 0.3
+        }
+    })
+    
+    # Cache settings
+    caching: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "max_cache_size_gb": 32,
+        "cache_type": "memory",  # memory or disk
+        "prefetch_factor": 2
+    })
 
 @dataclass
 class TrainingConfig:
+    """Configuration for training process."""
+    # Core training parameters
     learning_rate: float = 1e-3
     weight_decay: float = 1e-8
     epochs: int = 60
-    patience: int = 11
-    reduce_lr_patience: int = 3
-    device: str = None  # Will be determined during post_init
-    mixed_precision: bool = True
-    optimizer_type: str = "adam"
-    scheduler_type: str = "plateau"
     batch_accumulation: int = 1
-    
+    device: str = None
+    mixed_precision: bool = True
+    gradient_clip_value: Optional[float] = None
+
+    # Optimizer settings
+    optimizer_type: str = "adam"
+    optimizer_params: Dict[str, Any] = field(default_factory=lambda: {
+        "betas": (0.9, 0.999),
+        "eps": 1e-8,
+        "amsgrad": False
+    })
+
+    # Learning rate scheduler
+    scheduler_type: str = "plateau"
+    scheduler_params: Dict[str, Any] = field(default_factory=lambda: {
+        "mode": "min",
+        "factor": 0.1,
+        "patience": 3,
+        "verbose": True,
+        "min_lr": 1e-6
+    })
+
+    # Early stopping
+    early_stopping: Dict[str, Any] = field(default_factory=lambda: {
+        "patience": 11,
+        "min_delta": 0.0001,
+        "monitor": "val_loss",
+        "mode": "min"
+    })
+
+    # Data loading
+    dataloader_params: Dict[str, Any] = field(default_factory=lambda: {
+        "num_workers": 4,
+        "pin_memory": True,
+        "prefetch_factor": 2,
+        "persistent_workers": True
+    })
+
+    # Gradient accumulation
+    accumulation_params: Dict[str, Any] = field(default_factory=lambda: {
+        "gradient_clip_norm": None,
+        "skip_nan": True,
+        "sync_grad": True
+    })
+
+    # Manager configurations
+    checkpoint: CheckpointConfig = field(default_factory=lambda: CheckpointConfig(save_dir=Path("checkpoints")))
+    visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
+
     def __post_init__(self):
-        # Determine the most appropriate device automatically
         if self.device is None:
-            if torch.cuda.is_available():
-                if torch.cuda.device_count() > 1:
-                    self.device = "cuda:0"  # Use first GPU by default in multi-GPU setup
-                else:
-                    self.device = "cuda"
-            else:
-                self.device = "cpu"
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass
 class LossConfig:
@@ -96,31 +251,22 @@ class TrainerConfig:
     training: TrainingConfig
     loss: LossConfig
     experiment_name: str
-    save_dir: str = "./experiments"
+    save_dir: Union[str, Path] = "./experiments"
 
     def __post_init__(self):
-        # Validate class configuration
-        if not self.data.classes:
-            raise ValueError("Must specify at least one class")
-            
-        # Create class mapping if not provided
-        if not self.data.class_map:
-            self.data.class_map = {cls: idx for idx, cls in enumerate(self.data.classes)}
-            
-        # Set default stage weights if not provided
-        if not self.loss.stage_weights:
-            self.loss.stage_weights = [1.0] * len(self.cascade.stages)
-            
-        # Set default class weights if not provided
-        if not self.loss.class_weights:
-            self.loss.class_weights = {cls: 1.0 for cls in self.data.classes}
-            
-        # Validate stage configurations
+        # Convert save_dir to Path
+        self.save_dir = Path(self.save_dir)
+        
+        # Update checkpoint save directory to include experiment name
+        self.training.checkpoint.save_dir = self.save_dir / self.experiment_name / "checkpoints"
+        
+        # Validate configurations
         self._validate_cascade_config()
-    
+        self._validate_curriculum_config()
+        
     def _validate_cascade_config(self):
-        """Validate cascade configuration for consistency."""
-        # Check that all classes mentioned in stages exist in data.classes
+        """Validate cascade configuration."""
+        # Check classes in stages exist in data.classes
         all_stage_classes = set()
         for stage in self.cascade.stages:
             all_stage_classes.update(stage.input_classes)
@@ -133,72 +279,36 @@ class TrainerConfig:
         # Validate stage progression
         processed_classes = set()
         for i, stage in enumerate(self.cascade.stages):
-            # Check that input classes for this stage have been processed
             unprocessed = set(stage.input_classes) - processed_classes - {stage.target_class}
-            if unprocessed and i > 0:  # First stage can take any classes
+            if unprocessed and i > 0:
                 raise ValueError(f"Stage {i} requires unprocessed classes: {unprocessed}")
             processed_classes.add(stage.target_class)
-
-def create_liver_config() -> TrainerConfig:
-    """Create a sample configuration for liver segmentation."""
-    # Define all possible classes
-    classes = ["background", "liver", "tumor", "vessel", "nerve"]
-    
-    # Define cascade stages
-    stages = [
-        # First stage: Binary segmentation (foreground vs background)
-        StageConfig(
-            input_classes=["background", "foreground"],
-            target_class="foreground",
-            encoder_type="mobilenet_v2",
-            num_layers=5,
-            is_binary=True
-        ),
-        # Subsequent stages: Fine-grained segmentation
-        StageConfig(
-            input_classes=["foreground"],
-            target_class="liver",
-            encoder_type="resnet18",
-            num_layers=4
-        ),
-        StageConfig(
-            input_classes=["liver"],
-            target_class="tumor",
-            encoder_type="efficientnet",
-            num_layers=4
-        ),
-        StageConfig(
-            input_classes=["liver"],
-            target_class="vessel",
-            encoder_type="mobilenet_v2",
-            num_layers=3
-        )
-    ]
-    
-    return TrainerConfig(
-        data=DataConfig(
-            base_dir="path/to/data",
-            output_dir="path/to/output",
-            classes=classes,
-            class_map={cls: idx for idx, cls in enumerate(classes)},
-            window_params={"width": 180, "level": 50}
-        ),
-        cascade=CascadeConfig(
-            stages=stages,
-            in_channels=1,
-            initial_features=32,
-            feature_growth=2.0
-        ),
-        training=TrainingConfig(),
-        loss=LossConfig(
-            stage_weights=[1.0, 1.2, 1.2, 1.2],
-            class_weights={
-                "background": 1.0,
-                "liver": 2.0,
-                "tumor": 4.0,
-                "vessel": 3.0,
-                "nerve": 3.0
-            }
-        ),
-        experiment_name="liver_multiorgan_seg"
-    )
+            
+    def _validate_curriculum_config(self):
+        """Validate curriculum learning configuration."""
+        if not self.training.curriculum.enabled:
+            return
+            
+        curriculum = self.training.curriculum
+        num_stages = len(self.cascade.stages)
+        
+        # Validate stage schedule
+        if not curriculum.stage_schedule:
+            curriculum.stage_schedule = [(i, self.training.epochs // num_stages) 
+                                      for i in range(num_stages)]
+        
+        # Validate learning rates
+        if not curriculum.learning_rates:
+            curriculum.learning_rates = [self.training.learning_rate] * num_stages
+            
+        # Validate stage freezing
+        if not curriculum.stage_freezing:
+            curriculum.stage_freezing = [False] * num_stages
+            
+        # Validate lengths match number of stages
+        if len(curriculum.stage_schedule) != num_stages:
+            raise ValueError("Curriculum stage schedule must match number of model stages")
+        if len(curriculum.learning_rates) != num_stages:
+            raise ValueError("Curriculum learning rates must match number of model stages")
+        if len(curriculum.stage_freezing) != num_stages:
+            raise ValueError("Curriculum stage freezing must match number of model stages")

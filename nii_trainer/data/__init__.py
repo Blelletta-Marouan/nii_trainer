@@ -1,10 +1,14 @@
 """
-Data preprocessing and handling utilities for NIfTI images.
+Data processing and handling utilities for medical imaging data.
+
+This module provides comprehensive tools for:
+- Processing 3D medical imaging data (NIfTI format)
+- Batch processing of volume-segmentation pairs
+- Dataset creation and management
+- Data augmentation and preprocessing
 """
 
-from .preprocessing import NiiPreprocessor
-from .dataset import MultiClassSegDataset, PairedTransform
-from .batch_processor import BatchProcessor
+# Core data processing
 from .nifti_processor import (
     read_nifti_file,
     apply_window,
@@ -12,6 +16,18 @@ from .nifti_processor import (
     process_volume_and_segmentation,
     create_directory_structure
 )
+
+# Dataset and transforms
+from .dataset import (
+    MultiClassSegDataset,
+    PairedTransform,
+    create_dataloader
+)
+
+# Batch processing
+from .batch_processor import BatchProcessor
+
+# Pipeline utilities
 from .data_utils import (
     create_data_transforms,
     create_datasets,
@@ -20,26 +36,33 @@ from .data_utils import (
 )
 
 __all__ = [
-    # Legacy imports for backward compatibility
-    'NiiPreprocessor',
-    'read_nii',
-    'apply_window',
-    'MultiClassSegDataset',
-    'PairedTransform',
-    'BatchProcessor',
-    
-    # New modular functions for nifti processing
+    # Core processing
     'read_nifti_file',
+    'apply_window',
     'preprocess_volume',
     'process_volume_and_segmentation',
     'create_directory_structure',
     
-    # New modular functions for data pipeline
+    # Dataset components
+    'MultiClassSegDataset',
+    'PairedTransform',
+    'create_dataloader',
+    
+    # Batch processing
+    'BatchProcessor',
+    
+    # Pipeline utilities
     'create_data_transforms',
-    'create_datasets', 
+    'create_datasets',
     'create_dataloaders',
     'setup_data_pipeline'
 ]
 
-# For backward compatibility
-read_nii = read_nifti_file
+# Remove deprecated imports
+import warnings
+warnings.warn(
+    "The NiiPreprocessor class is deprecated and will be removed in a future version. "
+    "Use BatchProcessor or individual processing functions instead.",
+    DeprecationWarning,
+    stacklevel=2
+)

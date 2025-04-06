@@ -52,57 +52,92 @@ class FocalLoss(nn.Module):
 
 class MetricCalculator:
     """Calculates various metrics for reward computation."""
-    @staticmethod
-    def dice_coef(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    def __init__(self):
+        self.metric_cache = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        
+    def _get_cache_key(self, pred: torch.Tensor, target: torch.Tensor, threshold: float) -> str:
+        # Create a unique key based on input tensors and threshold
+        return f"{pred.shape}_{target.shape}_{threshold}_{pred.sum().item():.4f}_{target.sum().item():.4f}"
+    
+    def _safe_compute(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> Dict[str, torch.Tensor]:
+        """Safely compute all metrics at once to avoid redundant computations."""
         # Ensure target has the same shape as pred
         if pred.dim() == 4 and target.dim() == 3:
             target = target.unsqueeze(1)
         target = target.type_as(pred)
-            
+        
+        # Compute binary prediction once
         pred = (torch.sigmoid(pred) > threshold).float()
+        
+        # Basic metric components
         intersection = (pred * target).sum(dim=(2, 3))
-        union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-        dice = (2. * intersection + 1e-5) / (union + 1e-5)
-        return dice.mean()
-    
-    @staticmethod
-    def precision(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
-        # Ensure target has the same shape as pred
-        if pred.dim() == 4 and target.dim() == 3:
-            target = target.unsqueeze(1)
-        target = target.type_as(pred)
+        pred_sum = pred.sum(dim=(2, 3))
+        target_sum = target.sum(dim=(2, 3))
+        
+        # True positives (needed for multiple metrics)
+        tp = intersection
+        
+        # Compute metrics with safe division
+        smooth = 1e-5  # Small constant to prevent division by zero
+        
+        dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
+        
+        # Precision components
+        fp = pred_sum - tp
+        precision = (tp + smooth) / (tp + fp + smooth)
+        
+        # Recall components
+        fn = target_sum - tp
+        recall = (tp + smooth) / (tp + fn + smooth)
+        
+        # IoU components
+        union = pred_sum + target_sum - intersection
+        iou = (intersection + smooth) / (union + smooth)
+        
+        # Average and validate all metrics
+        metrics = {
+            'dice': torch.nan_to_num(dice.mean(), nan=0.0, posinf=1.0, neginf=0.0),
+            'precision': torch.nan_to_num(precision.mean(), nan=0.0, posinf=1.0, neginf=0.0),
+            'recall': torch.nan_to_num(recall.mean(), nan=0.0, posinf=1.0, neginf=0.0),
+            'iou': torch.nan_to_num(iou.mean(), nan=0.0, posinf=1.0, neginf=0.0)
+        }
+        
+        return metrics
+
+    def compute_metrics(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> Dict[str, torch.Tensor]:
+        """Compute all metrics with caching."""
+        cache_key = self._get_cache_key(pred, target, threshold)
+        
+        if cache_key in self.metric_cache:
+            self.cache_hits += 1
+            return self.metric_cache[cache_key]
+        
+        self.cache_misses += 1
+        metrics = self._safe_compute(pred, target, threshold)
+        
+        # Store in cache
+        self.metric_cache[cache_key] = metrics
+        
+        # Clear cache if it gets too large
+        if len(self.metric_cache) > 1000:
+            self.metric_cache.clear()
             
-        pred = (torch.sigmoid(pred) > threshold).float()
-        tp = (pred * target).sum(dim=(2, 3))
-        fp = pred.sum(dim=(2, 3)) - tp
-        precision = (tp + 1e-5) / (tp + fp + 1e-5)
-        return precision.mean()
-    
-    @staticmethod
-    def recall(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
-        # Ensure target has the same shape as pred
-        if pred.dim() == 4 and target.dim() == 3:
-            target = target.unsqueeze(1)
-        target = target.type_as(pred)
-            
-        pred = (torch.sigmoid(pred) > threshold).float()
-        tp = (pred * target).sum(dim=(2, 3))
-        fn = target.sum(dim=(2, 3)) - tp
-        recall = (tp + 1e-5) / (tp + fn + 1e-5)
-        return recall.mean()
-    
-    @staticmethod
-    def jaccard(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
-        # Ensure target has the same shape as pred
-        if pred.dim() == 4 and target.dim() == 3:
-            target = target.unsqueeze(1)
-        target = target.type_as(pred)
-            
-        pred = (torch.sigmoid(pred) > threshold).float()
-        intersection = (pred * target).sum(dim=(2, 3))
-        union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3)) - intersection
-        iou = (intersection + 1e-5) / (union + 1e-5)
-        return iou.mean()
+        return metrics
+
+    # Individual metric accessors that use the cached computation
+    def dice_coef(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+        return self.compute_metrics(pred, target, threshold)['dice']
+        
+    def precision(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+        return self.compute_metrics(pred, target, threshold)['precision']
+        
+    def recall(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+        return self.compute_metrics(pred, target, threshold)['recall']
+        
+    def jaccard(self, pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+        return self.compute_metrics(pred, target, threshold)['iou']
 
 class CascadedLossWithReward(nn.Module):
     """
@@ -114,16 +149,8 @@ class CascadedLossWithReward(nn.Module):
         self.config = config
         self.dice_loss = DiceLoss()
         self.focal_loss = FocalLoss(gamma=config.focal_gamma)
-        self.metrics = MetricCalculator()
+        self.metrics = MetricCalculator()  # Uses our optimized MetricCalculator
         self.logger = logger or logging.getLogger(__name__)
-        
-        self.logger.info("Initializing CascadedLossWithReward")
-        self.logger.debug(f"Loss config - BCE weight: {config.weight_bce}, Dice weight: {config.weight_dice}")
-        self.logger.debug(f"Focal gamma: {config.focal_gamma}, Reward coefficient: {config.reward_coef}")
-        if config.stage_weights:
-            self.logger.debug(f"Stage weights: {config.stage_weights}")
-        if config.class_weights:
-            self.logger.debug(f"Class weights: {config.class_weights}")
 
     def compute_stage_loss(
         self,
@@ -132,114 +159,74 @@ class CascadedLossWithReward(nn.Module):
         class_weight: float,
         threshold: float
     ) -> Dict[str, torch.Tensor]:
-        """
-        Compute loss and metrics for a single stage.
-        
-        Args:
-            pred: Model predictions (B, C, H, W)
-            target: Ground truth targets (B, C, H, W)
-            class_weight: Weight for this class/stage
-            threshold: Threshold for binary predictions
-        """
+        """Compute loss and metrics for a single stage."""
+        # Safety checks
+        if not torch.isfinite(pred).all():
+            self.logger.warning("Non-finite values in predictions, clipping...")
+            pred = torch.clamp(pred, -100, 100)
+
         # Ensure target has same shape as predictions
         if target.dim() == 3:
             target = target.unsqueeze(1)
         
-        # Basic losses
-        focal_loss = self.focal_loss(pred, target)
-        dice_loss = self.dice_loss(pred, target)
-        
-        # Check for valid loss values to prevent numerical instability
-        if not torch.isfinite(focal_loss):
-            self.logger.warning(f"Non-finite focal loss detected: {focal_loss}, using default value")
-            focal_loss = torch.tensor(0.5, device=pred.device)
-            
-        if not torch.isfinite(dice_loss):
-            self.logger.warning(f"Non-finite dice loss detected: {dice_loss}, using default value")
-            dice_loss = torch.tensor(0.5, device=pred.device)
-        
-        # Compute base loss with clipping - this is without reward
-        base_loss = (
-            self.config.weight_bce * torch.clamp(focal_loss, 0.0, 10.0) +
-            self.config.weight_dice * torch.clamp(dice_loss, 0.0, 10.0)
-        )
-        base_loss = torch.clamp(base_loss, 0.0, 10.0)
-        
-        # Compute metrics for reward with safe computation
-        with torch.no_grad():
-            try:
-                dice = self.metrics.dice_coef(pred, target, threshold)
-                precision = self.metrics.precision(pred, target, threshold)
-                recall = self.metrics.recall(pred, target, threshold)
-                iou = self.metrics.jaccard(pred, target, threshold)
-                
-                # Validate metric values
-                dice = 0.0 if not torch.isfinite(dice) else torch.clamp(dice, 0.0, 1.0)
-                precision = 0.0 if not torch.isfinite(precision) else torch.clamp(precision, 0.0, 1.0)
-                recall = 0.0 if not torch.isfinite(recall) else torch.clamp(recall, 0.0, 1.0)
-                iou = 0.0 if not torch.isfinite(iou) else torch.clamp(iou, 0.0, 1.0)
-            except Exception as e:
-                self.logger.warning(f"Error calculating metrics: {e}")
-                dice = torch.tensor(0.0, device=pred.device)
-                precision = torch.tensor(0.0, device=pred.device)
-                recall = torch.tensor(0.0, device=pred.device)
-                iou = torch.tensor(0.0, device=pred.device)
-        
-        # FIXED REWARD CALCULATION: Calculate reward based on metrics and ensure it REDUCES the loss
+        # Basic losses with safe computation
         try:
-            # Get reward coefficient from config (default to 0.5 if not specified)
-            reward_coef = getattr(self.config, 'reward_coef', 0.5)
+            focal_loss = self.focal_loss(pred, target)
+            dice_loss = self.dice_loss(pred, target)
             
-            # Calculate weighted metric score (higher is better)
-            # Fine-tuned weights to prioritize recall and dice for medical imaging
-            metric_score = (
-                0.3 * dice +        # Overall segmentation quality
-                0.1 * precision +   # Lower importance to avoid over-penalizing false positives  
-                0.4 * recall +      # Critical for medical applications (don't miss regions)
-                0.2 * iou           # Spatial overlap accuracy
+            # Handle non-finite losses
+            focal_loss = torch.nan_to_num(focal_loss, nan=0.5, posinf=1.0, neginf=0.0)
+            dice_loss = torch.nan_to_num(dice_loss, nan=0.5, posinf=1.0, neginf=0.0)
+            
+            # Safe base loss computation with clipping
+            base_loss = (
+                self.config.weight_bce * torch.clamp(focal_loss, 0.0, 10.0) +
+                self.config.weight_dice * torch.clamp(dice_loss, 0.0, 10.0)
             )
-            
-            # Calculate reward factor (between 0 and reward_coef)
-            # Higher metrics mean higher reward
+            base_loss = torch.clamp(base_loss, 0.0, 10.0)
+        except Exception as e:
+            self.logger.error(f"Error computing losses: {e}")
+            base_loss = torch.tensor(1.0, device=pred.device)
+            focal_loss = torch.tensor(0.5, device=pred.device)
+            dice_loss = torch.tensor(0.5, device=pred.device)
+
+        # Use optimized metric computation with caching
+        metrics = self.metrics.compute_metrics(pred, target, threshold)
+        
+        # Calculate reward safely
+        try:
+            reward_coef = getattr(self.config, 'reward_coef', 0.5)
+            metric_score = (
+                0.3 * metrics['dice'] +
+                0.1 * metrics['precision'] +
+                0.4 * metrics['recall'] +
+                0.2 * metrics['iou']
+            )
             reward = reward_coef * metric_score
-            
-            # Clamp to valid range, detach to prevent gradient tracking
             reward = torch.clamp(reward.detach(), 0.0, 0.9)
         except Exception as e:
             self.logger.warning(f"Error calculating reward: {e}")
             reward = torch.tensor(0.0, device=pred.device)
-        
-        # *** CRITICAL FIX: Apply reward by REDUCING the base loss ***
-        # Higher reward = lower loss = better encouragement for good predictions
-        loss_w_r = base_loss * (1.0 - reward)  # Multiplicative reduction
-        
-        # Debug logging (only for a small percentage of batches to avoid log flooding)
-        if torch.rand(1).item() < 0.01:  # Log for ~1% of batches
-            self.logger.debug(
-                f"Loss: base={base_loss.item():.4f}, with_reward={loss_w_r.item():.4f}, "
-                f"reduction={base_loss.item()-loss_w_r.item():.4f} "
-                f"({(1.0-loss_w_r.item()/base_loss.item())*100:.1f}%), "
-                f"metrics=[d={dice.item():.2f}, p={precision.item():.2f}, r={recall.item():.2f}]"
-            )
-        
-        # *** CRITICAL FIX: Use loss_w_r as the final loss for backpropagation ***
-        # This ensures we evaluate and train the model using the reward-adjusted loss
+
+        # Apply reward and class weight
+        loss_w_r = base_loss * (1.0 - reward)
         final_loss = class_weight * loss_w_r
-        
-        # Make sure all values are valid
+
+        # Final safety check
         if not torch.isfinite(final_loss):
             self.logger.warning(f"Non-finite final loss detected: {final_loss}, using base loss")
             final_loss = class_weight * base_loss
-        
+            loss_w_r = base_loss
+
         return {
-            'base_loss': base_loss.detach(),  # Original loss without reward
-            'loss_w_r': loss_w_r.detach(),   # Loss with reward (should be <= base_loss)
-            'total_loss': final_loss,        # Final loss with class weight (for backprop) - this is loss_w_r with class weight
-            'dice': dice.detach(),
-            'precision': precision.detach(),
-            'recall': recall.detach(),
-            'jaccard': iou.detach(),
-            'reward': reward.detach()       # Raw reward value
+            'base_loss': base_loss.detach(),
+            'loss_w_r': loss_w_r.detach(),
+            'total_loss': final_loss,
+            'dice': metrics['dice'].detach(),
+            'precision': metrics['precision'].detach(),
+            'recall': metrics['recall'].detach(),
+            'jaccard': metrics['iou'].detach(),
+            'reward': reward.detach()
         }
 
     def forward(
