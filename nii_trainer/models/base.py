@@ -1,224 +1,316 @@
-from typing import Dict, List, Optional, Type
+"""
+Base model classes for NII-Trainer.
+
+This module provides abstract base classes and common functionality
+for all models in the NII-Trainer framework.
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models
-from ..configs.config import ModelConfig
+from abc import ABC, abstractmethod
+from typing import Dict, List, Any, Optional, Tuple, Union
 
-class EncoderFactory:
-    @staticmethod
-    def create_encoder(config: ModelConfig) -> nn.Module:
-        """Create encoder based on configuration."""
-        if config.encoder_type == "mobilenet_v2":
-            return MobileNetV2Encoder(config)
-        elif config.encoder_type == "resnet18":
-            return ResNetEncoder(
-                model_fn=models.resnet18,
-                in_channels=config.in_channels,
-                initial_features=config.initial_features,
-                num_layers=config.num_layers,
-                pretrained=config.pretrained
+from ..core.exceptions import ModelError
+from ..core.registry import register_model
+
+
+class BaseModel(nn.Module, ABC):
+    """Abstract base class for all models."""
+    
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.config = kwargs
+    
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the model."""
+        pass
+    
+    @abstractmethod
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get model information including parameter count, architecture details."""
+        pass
+    
+    def count_parameters(self) -> int:
+        """Count total number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    
+    def freeze_layers(self, layer_names: List[str]) -> None:
+        """Freeze specified layers."""
+        for name, param in self.named_parameters():
+            if any(layer_name in name for layer_name in layer_names):
+                param.requires_grad = False
+    
+    def unfreeze_layers(self, layer_names: List[str]) -> None:
+        """Unfreeze specified layers."""
+        for name, param in self.named_parameters():
+            if any(layer_name in name for layer_name in layer_names):
+                param.requires_grad = True
+    
+    def get_layer_names(self) -> List[str]:
+        """Get names of all layers in the model."""
+        return [name for name, _ in self.named_modules()]
+
+
+class BaseEncoder(BaseModel):
+    """Base class for encoder architectures."""
+    
+    def __init__(self, in_channels: int = 1, **kwargs):
+        super().__init__(**kwargs)
+        self.in_channels = in_channels
+        self.features = []  # Store feature maps at different resolutions
+    
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        Forward pass returning multi-scale features.
+        
+        Returns:
+            List of feature tensors at different scales
+        """
+        pass
+
+
+class BaseDecoder(BaseModel):
+    """Base class for decoder architectures."""
+    
+    def __init__(self, out_channels: int = 1, **kwargs):
+        super().__init__(**kwargs)
+        self.out_channels = out_channels
+    
+    @abstractmethod
+    def forward(self, features: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Forward pass taking multi-scale features.
+        
+        Args:
+            features: List of feature tensors from encoder
+            
+        Returns:
+            Output tensor
+        """
+        pass
+
+
+class BaseCascadeModel(BaseModel):
+    """Base class for cascaded models."""
+    
+    def __init__(self, num_stages: int = 2, **kwargs):
+        super().__init__(**kwargs)
+        self.num_stages = num_stages
+        self.stages = nn.ModuleList()
+    
+    @abstractmethod
+    def forward_stage(self, x: torch.Tensor, stage_idx: int, 
+                     previous_outputs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        """Forward pass for a single stage."""
+        pass
+    
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        Forward pass through all stages.
+        
+        Returns:
+            List of outputs from each stage
+        """
+        outputs = []
+        previous_outputs = None
+        
+        for stage_idx in range(self.num_stages):
+            stage_output = self.forward_stage(x, stage_idx, previous_outputs)
+            outputs.append(stage_output)
+            previous_outputs = outputs.copy()
+        
+        return outputs
+    
+    def forward_single_stage(self, x: torch.Tensor, stage_idx: int,
+                           previous_outputs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        """Forward pass for a single stage only."""
+        return self.forward_stage(x, stage_idx, previous_outputs)
+
+
+class StageModule(nn.Module):
+    """Individual stage in a cascaded model."""
+    
+    def __init__(self, 
+                 stage_id: int,
+                 encoder: BaseEncoder,
+                 decoder: BaseDecoder,
+                 num_classes: int,
+                 depends_on: List[int] = None,
+                 fusion_strategy: str = 'concatenate'):
+        """
+        Initialize stage module.
+        
+        Args:
+            stage_id: Unique identifier for this stage
+            encoder: Encoder architecture
+            decoder: Decoder architecture  
+            num_classes: Number of output classes
+            depends_on: List of previous stage IDs this stage depends on
+            fusion_strategy: How to fuse inputs from previous stages
+        """
+        super().__init__()
+        self.stage_id = stage_id
+        self.encoder = encoder
+        self.decoder = decoder
+        self.num_classes = num_classes
+        self.depends_on = depends_on or []
+        self.fusion_strategy = fusion_strategy
+        
+        # Output projection
+        self.output_proj = nn.Conv2d(decoder.out_channels, num_classes, kernel_size=1)
+        
+        # Fusion layers if needed
+        if self.depends_on:
+            self._setup_fusion_layers()
+    
+    def _setup_fusion_layers(self):
+        """Setup layers for fusing inputs from previous stages."""
+        if self.fusion_strategy == 'concatenate':
+            # Additional channels from previous stages
+            extra_channels = len(self.depends_on) * self.num_classes
+            self.input_fusion = nn.Conv2d(
+                self.encoder.in_channels + extra_channels,
+                self.encoder.in_channels,
+                kernel_size=3, padding=1
             )
-        elif config.encoder_type == "efficientnet":
-            return EfficientNetEncoder(config)
+        elif self.fusion_strategy == 'add':
+            # Ensure compatible dimensions
+            self.input_fusion = nn.Conv2d(
+                self.num_classes, self.encoder.in_channels, kernel_size=1
+            )
+        elif self.fusion_strategy == 'attention':
+            self.attention_fusion = AttentionFusion(
+                self.encoder.in_channels, len(self.depends_on)
+            )
+    
+    def forward(self, x: torch.Tensor,
+                previous_outputs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        """Forward pass through this stage."""
+        # Prepare input with fusion from previous stages
+        stage_input = self._fuse_inputs(x, previous_outputs)
+        
+        # Encode
+        features = self.encoder(stage_input)
+        
+        # Decode
+        decoded = self.decoder(features)
+        
+        # Output projection
+        output = self.output_proj(decoded)
+        
+        return output
+    
+    def _fuse_inputs(self, x: torch.Tensor,
+                    previous_outputs: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+        """Fuse current input with outputs from previous stages."""
+        if not self.depends_on or previous_outputs is None:
+            return x
+        
+        # Get relevant previous outputs
+        relevant_outputs = [previous_outputs[idx] for idx in self.depends_on if idx < len(previous_outputs)]
+        
+        if not relevant_outputs:
+            return x
+        
+        if self.fusion_strategy == 'concatenate':
+            # Concatenate along channel dimension
+            fused_input = torch.cat([x] + relevant_outputs, dim=1)
+            return self.input_fusion(fused_input)
+        
+        elif self.fusion_strategy == 'add':
+            # Add previous outputs to current input
+            fused = x
+            for prev_out in relevant_outputs:
+                # Project to input space if needed
+                projected = self.input_fusion(prev_out)
+                fused = fused + projected
+            return fused
+        
+        elif self.fusion_strategy == 'attention':
+            return self.attention_fusion(x, relevant_outputs)
+        
         else:
-            raise ValueError(f"Unsupported encoder type: {config.encoder_type}")
+            raise ModelError(f"Unknown fusion strategy: {self.fusion_strategy}")
 
-class EncoderBase(nn.Module):
-    """Base class for all encoders."""
-    def __init__(self):
-        super().__init__()
-        self.stages: nn.ModuleList
-        self.out_channels: List[int]
-        
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        features = []
-        for stage in self.stages:
-            x = stage(x)
-            features.append(x)
-        return features
 
-class MobileNetV2Encoder(EncoderBase):
-    """MobileNetV2-based encoder."""
-    def __init__(self, config: ModelConfig):
+class AttentionFusion(nn.Module):
+    """Attention-based fusion of multiple inputs."""
+    
+    def __init__(self, in_channels: int, num_inputs: int):
         super().__init__()
-        backbone = models.mobilenet_v2(pretrained=config.pretrained)
+        self.in_channels = in_channels
+        self.num_inputs = num_inputs
         
-        # Modify first conv for arbitrary input channels
-        first_conv = nn.Conv2d(config.in_channels, 32, kernel_size=3, 
-                             stride=2, padding=1, bias=False)
-        if config.pretrained:
-            # Initialize with pretrained weights
-            if config.in_channels == 1:
-                # For single channel input, average the RGB weights
-                with torch.no_grad():
-                    first_conv.weight.data = backbone.features[0][0].weight.data.mean(dim=1, keepdim=True)
-            elif config.in_channels == 3:
-                # Standard 3-channel case, directly copy weights
-                with torch.no_grad():
-                    first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
-            elif config.in_channels > 3:
-                # Multi-channel case: copy first 3 channels and initialize the rest
-                with torch.no_grad():
-                    first_conv.weight[:, :3, ...] = backbone.features[0][0].weight
-                    mean_weights = torch.mean(backbone.features[0][0].weight, dim=1)
-                    first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
-                    
-        backbone.features[0][0] = first_conv
-        
-        # Split backbone into stages
-        self.stages = nn.ModuleList([
-            backbone.features[0],  # stage 1: 32 channels
-            nn.Sequential(*backbone.features[1:3]),  # stage 2: 24 channels
-            nn.Sequential(*backbone.features[3:6]),  # stage 3: 32 channels
-            nn.Sequential(*backbone.features[6:13]),  # stage 4: 96 channels
-            nn.Sequential(*backbone.features[13:])  # stage 5: 320 channels
-        ])
-        
-        self.out_channels = [32, 24, 32, 96, 320]
-
-class ResNetEncoder(EncoderBase):
-    """ResNet-based encoder."""
-    def __init__(
-        self,
-        model_fn: Type[nn.Module],
-        in_channels: int,
-        initial_features: int,
-        num_layers: int,
-        pretrained: bool = True
-    ):
-        super().__init__()
-        # Initialize with pretrained weights if requested
-        backbone = model_fn(pretrained=pretrained)
-        
-        # Modify first convolution layer to handle different input channels
-        first_conv = nn.Conv2d(
-            in_channels,
-            64,  # ResNet always uses 64 initial features
-            kernel_size=7,
-            stride=2,
-            padding=3,
-            bias=False
+        # Attention weights computation
+        self.attention = nn.Sequential(
+            nn.Conv2d(in_channels * (num_inputs + 1), in_channels, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, num_inputs + 1, kernel_size=1),
+            nn.Softmax(dim=1)
         )
         
-        # If using pretrained weights, adapt the first conv layer
-        if pretrained:
-            # For single channel input, average the RGB weights
-            if in_channels == 1:
-                first_conv.weight.data = backbone.conv1.weight.data.mean(dim=1, keepdim=True)
-            elif in_channels > 3:
-                first_conv.weight.data[:, :3, ...] = backbone.conv1.weight.data
-                first_conv.weight.data[:, 3:, ...] = 0.0
-        
-        backbone.conv1 = first_conv
-        
-        # Create stages
-        self.stages = nn.ModuleList([
-            nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu),
-            nn.Sequential(backbone.maxpool, backbone.layer1),
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4
-        ][:num_layers])  # Only keep the requested number of layers
-        
-        # Set output channels based on ResNet variant
-        if "18" in str(model_fn) or "34" in str(model_fn):
-            self.out_channels = [64, 64, 128, 256, 512][:num_layers]
-        else:  # ResNet50, 101, 152
-            self.out_channels = [64, 256, 512, 1024, 2048][:num_layers]
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        features = []
-        for stage in self.stages:
-            x = stage(x)
-            features.append(x)
-        return features
-
-class EfficientNetEncoder(EncoderBase):
-    """EfficientNet-based encoder."""
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        backbone = models.efficientnet_b0(pretrained=config.pretrained)
-        
-        # Modify first conv for arbitrary input channels
-        if config.in_channels != 3:
-            first_conv = nn.Conv2d(config.in_channels, 32, kernel_size=3,
-                                 stride=2, padding=1, bias=False)
-            if config.pretrained:
-                with torch.no_grad():
-                    # For single channel, use mean of RGB weights
-                    if config.in_channels == 1:
-                        first_conv.weight.data = backbone.features[0][0].weight.data.mean(dim=1, keepdim=True)
-                    else:
-                        # For more channels, copy first 3 and initialize rest with mean
-                        first_conv.weight[:, :min(3, config.in_channels), ...] = backbone.features[0][0].weight[:, :min(3, config.in_channels), ...]
-                        if config.in_channels > 3:
-                            mean_weights = torch.mean(backbone.features[0][0].weight, dim=1)
-                            first_conv.weight[:, 3:, ...] = mean_weights.unsqueeze(1)
-            backbone.features[0][0] = first_conv
-            
-        # Split into stages
-        self.stages = nn.ModuleList([
-            backbone.features[0:2],   # stage 1: 32 channels
-            backbone.features[2:3],   # stage 2: 24 channels
-            backbone.features[3:4],   # stage 3: 40 channels
-            backbone.features[4:6],   # stage 4: 112 channels
-            backbone.features[6:]     # stage 5: 320 channels
+        # Input projection layers
+        self.input_projs = nn.ModuleList([
+            nn.Conv2d(in_channels, in_channels, kernel_size=1)
+            for _ in range(num_inputs)
         ])
+    
+    def forward(self, primary_input: torch.Tensor,
+                auxiliary_inputs: List[torch.Tensor]) -> torch.Tensor:
+        """Apply attention-based fusion."""
+        # Project auxiliary inputs
+        proj_inputs = [proj(aux_inp) for proj, aux_inp in zip(self.input_projs, auxiliary_inputs)]
         
-        self.out_channels = [32, 24, 40, 112, 320]
+        # Concatenate all inputs for attention computation
+        all_inputs = [primary_input] + proj_inputs
+        concat_inputs = torch.cat(all_inputs, dim=1)
+        
+        # Compute attention weights
+        attention_weights = self.attention(concat_inputs)
+        
+        # Apply attention weights
+        fused_output = torch.zeros_like(primary_input)
+        for i, inp in enumerate(all_inputs):
+            weight = attention_weights[:, i:i+1, :, :]
+            fused_output += weight * inp
+        
+        return fused_output
 
-class DecoderBlock(nn.Module):
-    """Basic decoder block with skip connection support."""
-    def __init__(
-        self,
-        in_channels: int,
-        skip_channels: int,
-        out_channels: int,
-        dropout_rate: float = 0.0
-    ):
-        super().__init__()
-        # Handle initial upsampling conv
-        self.up_conv = nn.ConvTranspose2d(
-            in_channels, in_channels // 2,
-            kernel_size=2, stride=2
-        )
-        
-        # After concatenating with skip connection
-        combined_channels = (in_channels // 2) + skip_channels if skip_channels > 0 else in_channels // 2
-        
-        # Two convolutions to process combined features
-        self.conv1 = nn.Conv2d(combined_channels, out_channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout2d(dropout_rate) if dropout_rate > 0 else None
-        
-    def forward(self, x: torch.Tensor, skip: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Upconv instead of interpolate
-        x = self.up_conv(x)
-        
-        # Concatenate skip connection if provided
-        if skip is not None:
-            # Handle case where sizes don't match exactly
-            if x.shape[-2:] != skip.shape[-2:]:
-                x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
-            x = torch.cat([x, skip], dim=1)
-            
-        # First conv + activation
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        if self.dropout is not None:
-            x = self.dropout(x)
-            
-        # Second conv + activation    
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        if self.dropout is not None:
-            x = self.dropout(x)
-            
-        return x
+
+def calculate_receptive_field(model: nn.Module, input_size: Tuple[int, ...]) -> int:
+    """Calculate the receptive field of a model."""
+    # This is a simplified calculation - would need more sophisticated implementation
+    # for complex architectures
+    receptive_field = 1
+    
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            kernel_size = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else module.kernel_size
+            stride = module.stride[0] if isinstance(module.stride, tuple) else module.stride
+            receptive_field = (receptive_field - 1) * stride + kernel_size
+    
+    return receptive_field
+
+
+def get_model_summary(model: nn.Module, input_size: Tuple[int, ...]) -> Dict[str, Any]:
+    """Get comprehensive model summary."""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Calculate model size in MB
+    param_size = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffer_size = sum(b.numel() * b.element_size() for b in model.buffers())
+    model_size_mb = (param_size + buffer_size) / 1024 / 1024
+    
+    summary = {
+        'total_parameters': total_params,
+        'trainable_parameters': trainable_params,
+        'non_trainable_parameters': total_params - trainable_params,
+        'model_size_mb': model_size_mb,
+        'input_size': input_size,
+        'receptive_field': calculate_receptive_field(model, input_size)
+    }
+    
+    return summary

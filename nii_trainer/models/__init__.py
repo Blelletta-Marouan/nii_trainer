@@ -1,49 +1,64 @@
-"""Model architectures and training components."""
+"""
+Models module for NII-Trainer.
+"""
 
-# Core model architectures
-from .cascaded_unet import FlexibleCascadedUNet
-from .base import EncoderFactory, EncoderBase, MobileNetV2Encoder, ResNetEncoder, EfficientNetEncoder
+from .base import (
+    BaseModel,
+    BaseEncoder,
+    BaseDecoder,
+    BaseCascadeModel,
+    StageModule,
+    AttentionFusion,
+    calculate_receptive_field,
+    get_model_summary
+)
 
-# Training components
-from .model_trainer import ModelTrainer
-from .training_loop import TrainingLoop
-from .early_stopping import EarlyStoppingHandler
-from .checkpoint_manager import CheckpointManager
+from .encoders import (
+    ResNet18Encoder,
+    ResNet50Encoder,
+    EfficientNetB0Encoder,
+    MedicalCNNEncoder,
+    AttentionEncoder,
+    ChannelAttention,
+    SpatialAttention,
+    create_encoder
+)
 
-# Management components
-from .metrics_manager import MetricsManager, MetricAggregator
-from .visualization_manager import VisualizationManager
-from .curriculum_manager import CurriculumManager
-from .gradient_manager import GradientManager
+from .decoders import (
+    UNetDecoder,
+    FPNDecoder,
+    DeepLabV3Decoder,
+    LinkNetDecoder,
+    AttentionGate,
+    ASPP,
+    LinkNetDecoderBlock,
+    create_decoder
+)
 
-# Utilities
-from .model_utils import create_model, initialize_model_optimizer
-from .training_utils import setup_trainer
+from .cascaded import (
+    CascadedSegmentationModel,
+    SimpleUNet,
+    ProgressiveCascadeModel,
+    ProgressiveStage,
+    create_model,
+    load_pretrained_model
+)
 
 __all__ = [
-    # Model architectures
-    'FlexibleCascadedUNet',
-    'EncoderFactory',
-    'EncoderBase',
-    'MobileNetV2Encoder',
-    'ResNetEncoder',
-    'EfficientNetEncoder',
+    # Base classes
+    "BaseModel", "BaseEncoder", "BaseDecoder", "BaseCascadeModel",
+    "StageModule", "AttentionFusion", "calculate_receptive_field", "get_model_summary",
     
-    # Training components
-    'ModelTrainer',
-    'TrainingLoop',
-    'EarlyStoppingHandler',
-    'CheckpointManager',
+    # Encoders
+    "ResNet18Encoder", "ResNet50Encoder", "EfficientNetB0Encoder",
+    "MedicalCNNEncoder", "AttentionEncoder", "ChannelAttention", 
+    "SpatialAttention", "create_encoder",
     
-    # Management components
-    'MetricsManager',
-    'MetricAggregator',
-    'VisualizationManager',
-    'CurriculumManager',
-    'GradientManager',
+    # Decoders
+    "UNetDecoder", "FPNDecoder", "DeepLabV3Decoder", "LinkNetDecoder",
+    "AttentionGate", "ASPP", "LinkNetDecoderBlock", "create_decoder",
     
-    # Utilities
-    'create_model',
-    'initialize_model_optimizer',
-    'setup_trainer'
+    # Complete models
+    "CascadedSegmentationModel", "SimpleUNet", "ProgressiveCascadeModel",
+    "ProgressiveStage", "create_model", "load_pretrained_model"
 ]

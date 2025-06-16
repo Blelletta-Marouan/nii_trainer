@@ -1,0 +1,110 @@
+# Basic Configuration Template for NII-Trainer
+# This template provides a simple 2-stage cascaded segmentation setup
+
+# Global settings
+experiment_name: "basic_segmentation"
+output_dir: "./outputs"
+device: "auto"  # auto, cpu, cuda
+seed: 42
+num_workers: 4
+
+# Model configuration
+model:
+  model_name: "cascaded_segmentation"
+  input_channels: 1
+  num_classes: 2
+  num_stages: 2
+  use_deep_supervision: true
+  use_attention: false
+  pretrained: false
+  
+  # Stage definitions
+  stages:
+    - stage_id: 0
+      name: "coarse_segmentation"
+      encoder: "resnet18"
+      decoder: "unet"
+      num_classes: 2
+      depends_on: []
+      fusion_strategy: "none"
+    
+    - stage_id: 1
+      name: "fine_segmentation"
+      encoder: "resnet34"
+      decoder: "unet"
+      num_classes: 2
+      depends_on: [0]
+      fusion_strategy: "concatenate"
+
+# Data configuration
+data:
+  train_data_path: "/path/to/train"
+  val_data_path: "/path/to/val"
+  test_data_path: "/path/to/test"
+  
+  # Image preprocessing
+  image_size: [512, 512]
+  spacing: [1.0, 1.0, 1.0]
+  windowing:
+    preset: "abdomen"  # liver, lung, bone, brain, abdomen
+    window_center: 40
+    window_width: 400
+  
+  # Data augmentation
+  augmentation:
+    rotation_range: 15
+    translation_range: 0.1
+    scale_range: [0.9, 1.1]
+    flip_probability: 0.5
+    noise_std: 0.01
+    intensity_shift: 0.1
+
+# Training configuration
+training:
+  max_epochs: 100
+  batch_size: 8
+  learning_rate: 0.001
+  optimizer: "adam"
+  scheduler: "plateau"
+  
+  # Advanced training options
+  mixed_precision: true
+  gradient_clipping: 1.0
+  accumulate_grad_batches: 1
+  
+  # Early stopping
+  early_stopping_patience: 10
+  early_stopping_metric: "dice_foreground"
+  early_stopping_mode: "max"
+  
+  # Loss configuration
+  loss:
+    type: "dice_bce"
+    weights: [0.5, 0.5]  # [dice_weight, bce_weight]
+    class_weights: null
+    focal_gamma: 2.0
+
+# Evaluation configuration
+evaluation:
+  metrics: ["dice", "iou", "precision", "recall"]
+  threshold_optimization: true
+  compute_confidence_intervals: false
+  compute_hausdorff: false
+  compute_surface_distance: false
+  
+  # Visualization
+  save_predictions: true
+  save_overlays: true
+  max_visualizations: 10
+
+# Logging configuration
+logging:
+  level: "INFO"
+  log_to_file: true
+  tensorboard: true
+  wandb: false
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  save_best_only: false
+  checkpoint_metric: "dice_foreground"

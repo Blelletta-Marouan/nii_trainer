@@ -1,862 +1,259 @@
-# NII Trainer: Advanced Cascaded Medical Image Segmentation
+# NII-Trainer: Advanced Medical Image Segmentation Framework
 
-A powerful and flexible framework for training cascaded neural networks on medical imaging data (NIfTI format). This framework implements a novel binary-first approach for hierarchical multi-class segmentation, where the initial stage performs foreground/background separation before subsequent stages handle fine-grained class segmentation.
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+NII-Trainer is a comprehensive PyTorch-based framework specifically designed for medical image segmentation using advanced cascaded neural networks. It provides everything you need to train, evaluate, and deploy state-of-the-art segmentation models for medical imaging applications.
 
-## 🌟 Key Features
+## ✨ What Makes NII-Trainer Special?
 
-- **Binary-First Cascade Architecture**: 
-  - Initial stage performs binary segmentation
-  - Subsequent stages handle fine-grained class segmentation
-  - Hierarchical learning approach for improved performance
-  - Flexible multi-stage processing pipeline
-
-- **Flexible Model Architecture**:
-  - Multiple encoder backbones (MobileNetV2, ResNet18/50, EfficientNet)
-  - Configurable number of encoder/decoder layers per stage
-  - Optional skip connections and attention mechanisms
-  - Independent stage configurations for targeted optimization
-  - Support for 2D and 3D models
-
-- **Advanced Training Features**:
-  - Mixed precision training for faster execution
-  - Reward-based loss functions with adaptive weighting
-  - Automatic class balancing for imbalanced datasets
-  - Comprehensive metrics tracking and visualization
-  - Curriculum learning support with configurable stage progression
-  - Checkpoint management and experiment tracking
-
-- **Visualization and Monitoring**:
-  - Real-time training metrics and performance dashboards
-  - Interactive confusion matrices and error analysis
-  - Segmentation overlays with multi-class visualization
-  - Per-class performance metrics and volumetric analysis
-  - Uncertainty visualization for model confidence assessment
-
-## 📦 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/Blelletta-Marouan/nii-trainer
-cd nii-trainer
-
-# Install in development mode
-pip install -e .
-
-# Install required dependencies
-pip install -r requirements.txt
-
-# Optional: Install visualization dependencies
-pip install -r visualization_requirements.txt
-```
+- 🏥 **Medical Image Native**: Built specifically for medical imaging formats (NIfTI, DICOM, NRRD)
+- 🔗 **Cascaded Architecture**: Multi-stage progressive refinement for superior accuracy
+- 🚀 **Production Ready**: Complete training pipeline with monitoring, evaluation, and deployment
+- 🎯 **Easy to Use**: Simple API for beginners, advanced features for experts
+- 🧠 **Smart Training**: Automated mixed precision, early stopping, and hyperparameter optimization
+- 📊 **Comprehensive Evaluation**: Multiple metrics, statistical analysis, and visualization tools
 
 ## 🚀 Quick Start
 
-Here's a minimal example to get started with NII Trainer:
+### Installation
 
-```python
-from nii_trainer.configs import create_liver_config
-from nii_trainer.utils import Experiment
-
-# Create default configuration for liver segmentation
-config = create_liver_config()
-
-# Create and run experiment
-experiment = Experiment(
-    config=config,
-    experiment_name="liver_segmentation_demo",
-    base_dir="experiments"
-)
-
-# Run the full pipeline (data processing, training, evaluation)
-results = experiment.run(
-    volume_dir="path/to/volumes",
-    segmentation_dir="path/to/segmentations",
-    process_data=True,
-    curriculum=True,  # Use curriculum learning
-    force_overwrite=False
-)
-
-# Print results and visualize
-experiment.print_metrics()
-experiment.visualize()
+```bash
+pip install nii-trainer
 ```
 
-## 📋 Comprehensive Guide
-
-### 1. Data Processing Module
-
-NII Trainer offers flexible tools for processing NIfTI medical imaging data with extensive configuration options.
-
-#### Basic Data Processing
-
-The most straightforward way to process your NIfTI data:
+### Your First Model in 5 Minutes
 
 ```python
-from nii_trainer.data import NiiPreprocessor
-from nii_trainer.configs.config import DataConfig
+import nii_trainer
 
-# Configure basic preprocessing parameters
-data_config = DataConfig(
-    base_dir="raw_data",
-    output_dir="processed_data",
-    classes=["background", "liver", "tumor"],
-    class_map={"background": 0, "liver": 1, "tumor": 2},
-    
-    # Core preprocessing parameters
-    img_size=(512, 512),               # Target image size
-    slice_step=1,                      # Process every slice (use 2+ to skip slices)
-    skip_empty=True,                   # Skip slices without annotations
-    train_val_test_split=(0.7, 0.15, 0.15),  # Dataset split ratios
-    
-    # CT windowing parameters (for optimal tissue visualization)
-    window_params={"window_width": 180, "window_level": 50}
-)
+# Create a quick-start configuration
+config = nii_trainer.quick_start_config()
 
-# Initialize preprocessor and process a volume
-preprocessor = NiiPreprocessor(data_config)
-preprocessor.extract_slices(
-    volume_path="volumes/volume-0.nii",
-    segmentation_path="segmentations/segmentation-0.nii",
-    output_dir="processed_data"
-)
-```
+# Load your medical images
+train_data = nii_trainer.load_medical_image("path/to/train/images")
+val_data = nii_trainer.load_medical_image("path/to/val/images")
 
-#### Advanced Data Processing
-
-For more complex processing needs, use the `BatchProcessor` for greater control:
-
-```python
-from nii_trainer.data import BatchProcessor
-
-# Create batch processor with customizable parameters
-processor = BatchProcessor(
-    img_size=(512, 512),
-    window_params={"window_width": 180, "window_level": 50},
-    skip_empty=True,
-    slice_step=2,  # Process every 2nd slice
-    train_val_test_split=(0.6, 0.2, 0.2),
-    
-    # Customize file matching patterns
-    segmentation_pattern="segmentation-{}.nii",  # Uses {} as placeholder for ID
-    volume_pattern="volume-{}.nii"
-)
-
-# Process a batch of volumes
-processor.process_batch(
-    volume_dir="volumes",
-    segmentation_dir="segmentations",
-    output_dir="processed_data",
-    file_pattern="*.nii",
-    max_volumes=10,  # Limit the number of volumes to process
-    skip_existing=True,  # Skip already processed volumes
-    include_val=True,
-    include_test=True,
-    force_overwrite=False
-)
-
-# Or process with custom patterns
-processor.process_with_naming_convention(
-    base_dir="datasets/liver_tumor",
-    segmentation_dir="datasets/liver_tumor/labels",
-    output_dir="processed_data",
-    naming_convention={
-        "volume": "patient{}_ct.nii",
-        "segmentation": "patient{}_seg.nii"
-    }
-)
-```
-
-#### Tissue-Specific Parameters
-
-Configure different windowing parameters for different tissue types:
-
-```python
-from nii_trainer.data import NiiPreprocessor
-from nii_trainer.configs.config import DataConfig
-
-# Advanced preprocessing with tissue-specific windowing
-data_config = DataConfig(
-    base_dir="raw_data",
-    output_dir="processed_data",
-    classes=["background", "liver", "tumor", "vessel"],
-    class_map={"background": 0, "liver": 1, "tumor": 2, "vessel": 3},
-    
-    # Tissue-specific windowing parameters
-    window_params={
-        "liver": {"window_width": 150, "window_level": 30},
-        "tumor": {"window_width": 200, "window_level": 70},
-        "vessel": {"window_width": 400, "window_level": 100}
-    },
-    
-    # Advanced data augmentation
-    augmentation_params={
-        "rotation_range": (-30, 30),
-        "zoom_range": (0.9, 1.1),
-        "brightness_range": (0.8, 1.2),
-        "contrast_range": (0.8, 1.2),
-        "elastic_deformation": True,
-        "random_flip": True
-    }
-)
-
-preprocessor = NiiPreprocessor(data_config)
-```
-
-### 2. Dataset and DataLoader Module
-
-NII Trainer provides flexible dataset classes that support class balancing and custom transformations.
-
-#### Basic Dataset Creation
-
-```python
-from nii_trainer.data import MultiClassSegDataset, PairedTransform
-from torch.utils.data import DataLoader
-
-# Create dataset transform
-transform = PairedTransform(
-    img_size=(512, 512),
-    augment=True  # Enable data augmentation
-)
-
-# Create training dataset
-train_dataset = MultiClassSegDataset(
-    data_dir="processed_data/train",
-    class_map={"background": 0, "liver": 1, "tumor": 2},
-    transform=transform,
-    balance=True,  # Balance dataset across classes
-    required_classes=[1, 2]  # Focus on liver and tumor classes
-)
-
-# Create dataloaders
-train_loader = DataLoader(
-    train_dataset, 
-    batch_size=16,
-    shuffle=True,
-    num_workers=4,
-    pin_memory=True
-)
-```
-
-#### Advanced Data Pipeline
-
-For a complete data pipeline setup, use the utility functions:
-
-```python
-from nii_trainer.data import setup_data_pipeline
-from nii_trainer.configs.config import DataConfig
-from nii_trainer.utils import setup_logger
-
-# Setup logger
-logger = setup_logger("dataset_setup", "logs")
-
-# Create data configuration
-data_config = DataConfig(
-    base_dir="raw_data",
-    output_dir="processed_data",
-    classes=["background", "liver", "tumor"],
-    class_map={"background": 0, "liver": 1, "tumor": 2},
-    img_size=(512, 512),
-    batch_size=16,
-    num_workers=4,
-    train_val_test_split=(0.7, 0.15, 0.15),
-    balance_dataset=True
-)
-
-# Setup complete data pipeline
-datasets, dataloaders = setup_data_pipeline(
-    config=data_config,
-    logger=logger
-)
-
-# Use the dataloaders
-train_loader = dataloaders["train"]
-val_loader = dataloaders["val"]
-test_loader = dataloaders["test"]
-```
-
-### 3. Model Architecture Module
-
-Configure your model architecture with multiple options for encoders, decoders, and cascade stages.
-
-#### Basic Model Configuration
-
-```python
-from nii_trainer.configs.config import TrainerConfig, CascadeConfig, StageConfig
-
-# Create cascade configuration with one stage for liver segmentation
-cascade_config = CascadeConfig(
-    stages=[
-        StageConfig(
-            input_classes=["background", "liver"],
-            target_class="liver",
-            encoder_type="mobilenet_v2",  # Options: mobilenet_v2, resnet18, resnet50, efficientnet
-            num_layers=5,
-            skip_connections=True,
-            dropout_rate=0.3,
-            is_binary=True  # Binary segmentation (foreground vs background)
-        )
-    ],
-    in_channels=1,  # Single channel input (grayscale)
-    initial_features=32,  # Starting feature count
-    pretrained=True  # Use pretrained encoder weights
-)
-
-# Create the model
-from nii_trainer.models import FlexibleCascadedUNet
-model = FlexibleCascadedUNet(cascade_config)
-```
-
-#### Multi-Stage Cascade Architecture
-
-Configure a complex multi-stage segmentation cascade:
-
-```python
-from nii_trainer.configs.config import CascadeConfig, StageConfig
-
-# Create a 3-stage cascade configuration
-cascade_config = CascadeConfig(
-    stages=[
-        # Stage 1: Binary liver segmentation with EfficientNet
-        StageConfig(
-            input_classes=["background", "liver"],
-            target_class="liver",
-            encoder_type="efficientnet",
-            num_layers=5,
-            skip_connections=True,
-            dropout_rate=0.3,
-            is_binary=True,
-            threshold=0.5  # Prediction threshold
-        ),
-        # Stage 2: Tumor segmentation within liver using ResNet50
-        StageConfig(
-            input_classes=["liver"],  # Uses liver mask from previous stage
-            target_class="tumor",
-            encoder_type="resnet50",
-            num_layers=4,
-            skip_connections=True,
-            dropout_rate=0.4,
-            threshold=0.4
-        ),
-        # Stage 3: Vessel segmentation within liver using MobileNetV2
-        StageConfig(
-            input_classes=["liver"],  # Uses liver mask from stage 1
-            target_class="vessel",
-            encoder_type="mobilenet_v2",
-            num_layers=3,
-            skip_connections=True,
-            dropout_rate=0.3,
-            threshold=0.5
-        )
-    ],
-    in_channels=1,
-    initial_features=64,
-    feature_growth=2.0,  # Feature multiplication between stages
-    pretrained=True
-)
-```
-
-### 4. Training Configuration Module
-
-Configure all aspects of model training, from optimizer settings to loss functions.
-
-#### Basic Training Configuration
-
-```python
-from nii_trainer.configs.config import TrainingConfig, LossConfig
-
-# Configure training parameters
-training_config = TrainingConfig(
-    learning_rate=1e-4,
-    weight_decay=1e-5,
-    epochs=100,
-    patience=10,  # Early stopping patience
-    mixed_precision=True,  # Enable mixed precision for faster training
-    batch_accumulation=2,  # Gradient accumulation steps
-    optimizer_type="adam",  # Options: adam, sgd, adamw
-    scheduler_type="plateau"  # Options: plateau, step, cosine
-)
-
-# Configure loss function
-loss_config = LossConfig(
-    weight_bce=0.5,  # Binary cross-entropy weight
-    weight_dice=0.5,  # Dice loss weight
-    focal_gamma=2.0,  # Focal loss gamma parameter
-    reward_coef=0.1,  # Reward coefficient for adaptive weighting
-    
-    # Per-stage loss weighting
-    stage_weights=[1.0, 1.2, 1.5],  # Higher weights for later stages
-    
-    # Per-class weighting to address class imbalance
-    class_weights={
-        "background": 1.0,
-        "liver": 2.0,
-        "tumor": 4.0,  # Higher weight for tumor class (typically rarer)
-        "vessel": 3.0
-    },
-    
-    # Per-class prediction thresholds
-    threshold_per_class=[0.5, 0.4, 0.5]
-)
-```
-
-#### Complete Trainer Configuration
-
-Combine all configurations into a unified trainer configuration:
-
-```python
-from nii_trainer.configs.config import TrainerConfig, DataConfig
-
-# Create complete trainer configuration
-trainer_config = TrainerConfig(
-    data=data_config,  # Data configuration from previous examples
-    cascade=cascade_config,  # Cascade configuration from previous examples
-    training=training_config,  # Training configuration from above
-    loss=loss_config,  # Loss configuration from above
-    experiment_name="liver_multiorgan_advanced",
-    save_dir="./experiments"
-)
-```
-
-### 5. Model Training Module
-
-Configure and run model training with different approaches, including curriculum learning.
-
-#### Standard Training
-
-```python
-from nii_trainer.models import ModelTrainer
-import torch.optim as optim
-
-# Create trainer
-trainer = ModelTrainer(
-    config=trainer_config,
-    model=model,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    optimizer=optim.Adam(model.parameters(), lr=1e-4),
-    scheduler=optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        patience=5, 
-        factor=0.2
-    ),
-    logger=logger
-)
+# Create and train a cascaded segmentation model
+model = nii_trainer.create_cascaded_model(config.model)
+trainer = nii_trainer.BaseTrainer(model, config)
 
 # Train the model
-results = trainer.train()
+results = trainer.fit(train_data, val_data)
+
+# Evaluate performance
+evaluator = nii_trainer.create_evaluator(config.evaluation)
+metrics = evaluator.evaluate(model, test_data)
+print(f"Dice Score: {metrics['dice_score']:.3f}")
 ```
 
-#### Curriculum Learning
+### Command Line Interface
 
-Train your model using curriculum learning, focusing on one stage at a time:
+Train a model with just one command:
+
+```bash
+# Quick training with defaults
+nii-trainer train --data-dir /path/to/data --output-dir ./results
+
+# Advanced configuration
+nii-trainer train --config config.yaml --gpu 0 --epochs 100
+
+# Evaluate trained model
+nii-trainer evaluate --model-path ./results/best_model.pth --test-data /path/to/test
+
+# Make predictions on new images
+nii-trainer predict --input image.nii.gz --output prediction.nii.gz --model ./results/best_model.pth
+```
+
+## 🏗️ Architecture Overview
+
+NII-Trainer implements a sophisticated cascaded approach:
+
+```
+Stage 1: Coarse Segmentation
+    ├── ResNet/EfficientNet Encoder
+    ├── U-Net/FPN Decoder
+    └── Initial region localization
+
+Stage 2: Fine Segmentation
+    ├── Advanced encoder with attention
+    ├── Multi-scale feature fusion
+    └── Refined segmentation with Stage 1 guidance
+
+Stage 3: Post-processing (Optional)
+    ├── Morphological operations
+    ├── Boundary refinement
+    └── Quality assurance checks
+```
+
+## 📚 Key Components
+
+### 🔧 Core Features
+
+- **Model Architectures**: Cascaded U-Net, Progressive Cascade, Multi-stage architectures
+- **Encoders**: ResNet, EfficientNet, DenseNet, with pretrained weights
+- **Decoders**: U-Net, FPN, DeepLab variants
+- **Loss Functions**: Dice, Focal, Tversky, IoU, Boundary, and composite losses
+- **Data Processing**: Automatic preprocessing, augmentation, and normalization
+
+### 📊 Training & Evaluation
+
+- **Smart Training**: Mixed precision, distributed training, gradient clipping
+- **Advanced Optimizers**: Adam, AdamW, SGD with custom schedulers
+- **Comprehensive Metrics**: Dice, IoU, Hausdorff distance, surface distance
+- **Visualization**: Training curves, prediction overlays, attention maps
+
+### 🔌 Extensibility
+
+- **Plugin Architecture**: Easy to add custom models, losses, and metrics
+- **Configuration System**: YAML-based configuration with validation
+- **Registry System**: Automatic component discovery and registration
+
+## 🎯 Supported Use Cases
+
+| Application | Description | Key Features |
+|-------------|-------------|--------------|
+| **Organ Segmentation** | Liver, kidney, heart, brain | Multi-organ support, anatomical priors |
+| **Tumor Detection** | Cancer detection and delineation | Boundary refinement, uncertainty estimation |
+| **Pathology Analysis** | Tissue classification | Multi-class segmentation, attention mechanisms |
+| **Research** | Custom medical AI applications | Flexible architecture, extensive customization |
+
+## 📖 Documentation & Examples
+
+### 📝 Detailed Guides
+
+- [📚 User Guide](docs/user_guide.md) - Complete usage tutorial
+- [⚙️ Configuration Guide](docs/configuration.md) - All configuration options
+- [🔧 API Reference](docs/api/) - Complete API documentation
+- [🚀 Advanced Features](docs/advanced/) - Expert-level features
+
+### 💡 Example Projects
 
 ```python
-# Train with curriculum learning
-curriculum_params = {
-    'stage_schedule': [
-        (0, 40),  # Train liver stage for 40 epochs
-        (1, 60)   # Add tumor stage for 60 more epochs
-    ],
-    'learning_rates': [1e-3, 5e-4],  # Different learning rates per stage
-    'stage_freezing': [False, True]   # Freeze previous stages when training new ones
+# Example 1: Liver Segmentation
+from nii_trainer import create_model, BaseTrainer
+
+config = {
+    'model_name': 'cascaded_segmentation',
+    'num_stages': 2,
+    'input_channels': 1,
+    'num_classes': 2
 }
 
-results = trainer.train_with_curriculum(
-    stage_schedule=curriculum_params['stage_schedule'],
-    learning_rates=curriculum_params['learning_rates'],
-    stage_freezing=curriculum_params['stage_freezing']
+model = create_model(config)
+trainer = BaseTrainer(model)
+trainer.fit(train_loader, val_loader)
+
+# Example 2: Multi-organ Segmentation
+config = {
+    'model_name': 'progressive_cascade',
+    'num_stages': 3,
+    'num_classes': 5,  # Background + 4 organs
+    'use_attention': True,
+    'use_deep_supervision': True
+}
+
+# Example 3: Custom Loss Function
+from nii_trainer.training.losses import DiceFocalLoss
+
+custom_loss = DiceFocalLoss(
+    dice_weight=0.7,
+    focal_weight=0.3,
+    focal_gamma=2.0
 )
 ```
+## ⚡ Advanced Features
 
-#### Transfer Learning and Fine-Tuning
-
-Load a pre-trained model and fine-tune it for a new task:
+### 🎛️ Hyperparameter Optimization
 
 ```python
-# Create a new model with the same architecture
-model = FlexibleCascadedUNet(cascade_config)
-trainer = ModelTrainer(config, model, train_loader, val_loader)
+from nii_trainer.experimental import AutoTuner
 
-# Load pre-trained weights
-trainer.load_checkpoint("experiments/pretrained_model/best_model.pth")
-
-# Choose a fine-tuning strategy
-# Strategy 1: Fine-tune all layers with a smaller learning rate
-trainer.optimizer = optim.Adam(model.parameters(), lr=1e-5)
-trainer.train(epochs=20)
-
-# Strategy 2: Only fine-tune specific stages
-# Freeze all parameters first
-for param in model.parameters():
-    param.requires_grad = False
-    
-# Unfreeze only the tumor stage parameters
-for param in model.stages[1].parameters():
-    param.requires_grad = True
-    
-trainer.optimizer = optim.Adam(
-    filter(lambda p: p.requires_grad, model.parameters()), 
-    lr=2e-5
+# Automatic hyperparameter tuning
+tuner = AutoTuner(
+    model_config=config,
+    search_space='default',
+    n_trials=50
 )
-trainer.train(epochs=15)
+
+best_params = tuner.optimize(train_data, val_data)
 ```
 
-### 6. Visualization and Metrics Module
-
-NII Trainer provides comprehensive tools for visualizing and monitoring training progress and results.
-
-#### Basic Metrics Visualization
+### 📊 Experiment Tracking
 
 ```python
-from nii_trainer.visualization import SegmentationVisualizer
-
-# Initialize visualizer
-visualizer = SegmentationVisualizer(
-    class_names=["background", "liver", "tumor"],
-    save_dir="visualizations"
-)
-
-# Plot training metrics history
-visualizer.plot_metrics(
-    metrics=trainer.metrics_history,
-    save_path="results/training_metrics.png"
-)
-
-# Generate confusion matrix
-visualizer.plot_confusion_matrix(
-    predictions=model_predictions,
-    targets=ground_truth,
-    save_path="results/confusion_matrix.png"
-)
-```
-
-#### Advanced Visualization
-
-Visualize model predictions and errors:
-
-```python
-# Visualize a batch of predictions
-for images, targets in test_loader:
-    # Get model predictions
-    predictions = model(images.to(device))
-    
-    # Visualize each sample
-    for i in range(min(8, len(images))):
-        visualizer.visualize_prediction(
-            image=images[i],
-            prediction=predictions[i],
-            target=targets[i],
-            overlay_alpha=0.6,
-            show_class_colors=True,
-            highlight_errors=True,
-            save_path=f"results/sample_{i}.png"
-        )
-    break
-
-# Find and visualize worst cases (samples with lowest Dice scores)
-worst_cases = visualizer.find_worst_cases(
-    dataloader=test_loader,
+# Integration with popular tracking tools
+trainer = BaseTrainer(
     model=model,
-    metric="dice",
-    n_cases=5,
-    class_name="tumor"
+    logger='wandb',  # or 'tensorboard', 'mlflow'
+    experiment_name='liver_segmentation_v2'
 )
-
-for idx, sample in enumerate(worst_cases):
-    visualizer.visualize_prediction(
-        image=sample["image"],
-        prediction=sample["prediction"],
-        target=sample["target"],
-        metrics=sample["metrics"],
-        save_path=f"results/error_analysis/worst_case_{idx}.png"
-    )
 ```
 
-#### Comprehensive Metric Tracking
-
-Monitor and log a wide range of metrics:
+### 🔄 Model Ensemble
 
 ```python
-# Evaluate model on test set
-metrics = trainer.evaluate(test_loader)
+# Combine multiple models for better performance
+from nii_trainer.experimental import ModelEnsemble
 
-# Print results with formatting
-print("\nTest Results:")
-print("=" * 50)
-for key in ["loss", "dice", "precision", "recall", "iou"]:
-    if key in metrics:
-        print(f"{key.capitalize():15s}: {metrics[key]:.4f}")
-
-# Per-class metrics
-for class_name in ["liver", "tumor"]:
-    class_key = f"{class_name}_dice"
-    if class_key in metrics:
-        print(f"{class_name.capitalize():10s} Dice: {metrics[class_key]:.4f}")
-
-# Save metrics to file
-import json
-with open("results/test_metrics.json", "w") as f:
-    json.dump(metrics, f, indent=4)
+ensemble = ModelEnsemble([model1, model2, model3])
+predictions = ensemble.predict(test_images)
 ```
 
-### 7. Experiment Workflow Module
+## 🛠️ Installation Options
 
-NII Trainer's Experiment class provides a unified interface for running complete workflows.
-
-#### Complete Experiment Workflow
-
-```python
-from nii_trainer.utils import Experiment, setup_logger
-from nii_trainer.configs import create_liver_tumor_config
-
-# Setup logging
-logger = setup_logger(
-    experiment_name="liver_tumor_workflow",
-    save_dir="logs",
-    level="INFO"
-)
-
-# Create configuration
-config = create_liver_tumor_config(
-    volume_dir="data/volumes",
-    output_dir="data/processed",
-    img_size=(512, 512),
-    batch_size=16,
-    window_width=180,
-    window_level=50,
-    skip_empty=True,
-    slice_step=1,
-    train_val_test_split=(0.7, 0.15, 0.15),
-    learning_rate=1e-4,
-    epochs=100,
-    experiment_name="liver_tumor_complete"
-)
-
-# Create and initialize experiment
-experiment = Experiment(
-    config=config,
-    experiment_name="liver_tumor_complete",
-    base_dir="experiments",
-    logger=logger
-)
-
-# Run the complete pipeline
-results = experiment.run(
-    volume_dir="data/volumes",
-    segmentation_dir="data/segmentations",
-    process_data=True,
-    curriculum=True,
-    curriculum_params={
-        'stage_schedule': [
-            (0, 40),  # Liver stage for 40 epochs
-            (1, 60)   # Tumor stage for 60 epochs
-        ],
-        'learning_rates': [1e-3, 5e-4],
-        'stage_freezing': [False, True]
-    },
-    force_overwrite=False
-)
-
-# Generate final visualizations
-experiment.visualize()
-
-# Print performance summary
-experiment.print_metrics(format="table")
+### Standard Installation
+```bash
+pip install nii-trainer
 ```
 
-#### Custom Workflow Components
-
-You can also use the Experiment class for more granular control:
-
-```python
-# Create experiment
-experiment = Experiment(config=config)
-
-# Step 1: Process data only if needed
-if not Path("data/processed").exists():
-    experiment.process_data(
-        volume_dir="data/volumes",
-        segmentation_dir="data/segmentations",
-        force_overwrite=False
-    )
-
-# Step 2: Setup data pipeline manually
-datasets, dataloaders = experiment.setup_data_pipeline()
-
-# Step 3: Setup model and trainer
-model, trainer = experiment.setup_model()
-
-# Step 4: Train with custom parameters
-experiment.train(
-    curriculum=True,
-    curriculum_params=custom_curriculum_params
-)
-
-# Step 5: Evaluate on specific data
-test_metrics = experiment.evaluate(
-    dataloader=dataloaders["test"]
-)
-
-# Step 6: Generate specific visualizations
-experiment.visualize_predictions(
-    dataloader=dataloaders["test"],
-    num_samples=10,
-    save_dir="results/visualizations"
-)
-
-# Step 7: Save experiment summary
-experiment.save_summary()
+### Development Installation
+```bash
+git clone https://github.com/your-org/nii-trainer.git
+cd nii-trainer
+pip install -e ".[dev]"
 ```
 
-### 8. Real-world Example: Liver and Tumor Segmentation
-
-Here's a comprehensive example for liver and tumor segmentation:
-
-```python
-from nii_trainer.utils import Experiment, setup_logger
-from nii_trainer.configs.config import (
-    TrainerConfig, DataConfig, CascadeConfig, 
-    StageConfig, TrainingConfig, LossConfig
-)
-from pathlib import Path
-
-# Setup logging
-logger = setup_logger("liver_tumor_project", "logs")
-
-# 1. Create detailed configuration
-config = TrainerConfig(
-    data=DataConfig(
-        base_dir="dataset/LiTS",
-        output_dir="processed/LiTS",
-        classes=["background", "liver", "tumor"],
-        class_map={"background": 0, "liver": 1, "tumor": 2},
-        img_size=(512, 512),
-        batch_size=8,
-        num_workers=4,
-        window_params={"window_width": 200, "window_level": 40},
-        skip_empty=True,
-        slice_step=2,
-        train_val_test_split=(0.7, 0.15, 0.15),
-        balance_dataset=True
-    ),
-    cascade=CascadeConfig(
-        stages=[
-            # Stage 1: Binary liver segmentation
-            StageConfig(
-                input_classes=["background", "liver"],
-                target_class="liver",
-                encoder_type="efficientnet",
-                num_layers=4,
-                skip_connections=True,
-                dropout_rate=0.3,
-                is_binary=True,
-                threshold=0.5
-            ),
-            # Stage 2: Tumor segmentation within liver
-            StageConfig(
-                input_classes=["liver"],
-                target_class="tumor",
-                encoder_type="resnet50",
-                num_layers=5,
-                skip_connections=True,
-                dropout_rate=0.4,
-                is_binary=True,
-                threshold=0.4
-            )
-        ],
-        in_channels=1,
-        initial_features=32,
-        feature_growth=2.0,
-        pretrained=True
-    ),
-    training=TrainingConfig(
-        learning_rate=2e-4,
-        weight_decay=1e-5,
-        epochs=120,
-        patience=15,
-        mixed_precision=True,
-        batch_accumulation=2,
-        optimizer_type="adam",
-        scheduler_type="plateau"
-    ),
-    loss=LossConfig(
-        weight_bce=0.4,
-        weight_dice=0.6,
-        focal_gamma=2.0,
-        reward_coef=0.2,
-        stage_weights=[1.0, 1.5],
-        class_weights={
-            "background": 1.0,
-            "liver": 2.0,
-            "tumor": 5.0
-        },
-        threshold_per_class=[0.5, 0.4]
-    ),
-    experiment_name="liver_tumor_segmentation",
-    save_dir="experiments"
-)
-
-# 2. Create experiment
-experiment = Experiment(
-    config=config,
-    experiment_name="liver_tumor_segmentation",
-    base_dir="experiments",
-    logger=logger
-)
-
-# 3. Run the complete pipeline
-results = experiment.run(
-    volume_dir="dataset/LiTS/volumes",
-    segmentation_dir="dataset/LiTS/segmentations",
-    process_data=True,
-    curriculum=True,
-    curriculum_params={
-        'stage_schedule': [
-            (0, 60),  # Train liver stage for 60 epochs
-            (1, 60)   # Add tumor stage for 60 more epochs
-        ],
-        'learning_rates': [5e-4, 2e-4],
-        'stage_freezing': [False, True]
-    },
-    force_overwrite=False
-)
-
-# 4. Print and save results
-experiment.print_metrics()
-experiment.save_summary(include_config=True)
-
-# 5. Generate comprehensive visualizations
-experiment.visualize(
-    save_dir="results/visualizations",
-    include_worst_cases=True,
-    include_confusion_matrix=True,
-    include_metrics_plots=True
-)
-
-# 6. Export model for inference
-experiment.export_model(
-    export_format="onnx",
-    export_path="models/liver_tumor_model.onnx"
-)
+### Docker Installation
+```bash
+docker pull nii-trainer/nii-trainer:latest
+docker run -it --gpus all nii-trainer/nii-trainer:latest
 ```
 
+## 🤝 Community & Support
 
-## 📖 Citation
+- 💬 **Discord**: [Join our community](https://discord.gg/nii-trainer)
+- 📧 **Email**: support@nii-trainer.org
+- 🐛 **Issues**: [GitHub Issues](https://github.com/your-org/nii-trainer/issues)
+- 📖 **Documentation**: [Full docs](https://nii-trainer.readthedocs.io)
 
-If you use this package in your research, please cite:
+## 🚧 Roadmap
+
+- [ ] **Q2 2024**: 3D segmentation support
+- [ ] **Q3 2024**: Federated learning capabilities
+- [ ] **Q4 2024**: Real-time inference optimization
+- [ ] **Q1 2025**: Mobile deployment support
+
+## 📄 Citation
+
+If you use NII-Trainer in your research, please cite:
 
 ```bibtex
-@software{nii_trainer2025,
-    title={NII Trainer: Advanced Cascaded Medical Image Segmentation},
-    author={BLELLETTA Marouan},
-    year={2025},
-    url={https://github.com/Blelletta-Marouan/nii_trainer},
-    version={0.1.0},
-    description={A flexible framework for training cascaded neural networks on medical imaging data}
+@software{nii_trainer,
+  title={NII-Trainer: Advanced Medical Image Segmentation Framework},
+  author={NII-Trainer Development Team},
+  year={2024},
+  url={https://github.com/your-org/nii-trainer}
 }
 ```
 
-## 📄 License
+## 🙏 Acknowledgments
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- PyTorch team for the excellent deep learning framework
+- Medical imaging community for datasets and feedback
+- All contributors and users who help improve NII-Trainer
+
+---
+
+**Ready to get started?** Check out our [Quick Start Guide](docs/quickstart.md) or try the [Interactive Tutorial](https://colab.research.google.com/github/your-org/nii-trainer/blob/main/examples/tutorial.ipynb)!
